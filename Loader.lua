@@ -15,15 +15,16 @@ local log = function(...) print("[AutoSell]", ...) end
 ------------------------------------------------------------
 -- Helpers
 ------------------------------------------------------------
-local function count(t) local n=0; for _ in pairs(t) do n=n+1 end; return n end
-
 local function getSave()
-    return Save.Get(LocalPlayer, false) or Save.Get()
+    local ok, s = pcall(function() return Save.Get(LocalPlayer, false) end)
+    if ok and s then return s end
+    local ok2, s2 = pcall(function() return Save.Get() end)
+    return ok2 and s2 or nil
 end
 
 local function getMoney()
-    local data = getSave()
-    return (data and type(data.Money) == "number") and data.Money or 0
+    local d = getSave()
+    return (d and type(d.Money) == "number") and d.Money or 0
 end
 
 local function getHRP()
@@ -36,9 +37,7 @@ end
 ------------------------------------------------------------
 local function installOverride()
     pcall(function()
-        Remotes.Haul.OfferFullSatchelSale.OnClientInvoke = function(_)
-            return true
-        end
+        Remotes.Haul.OfferFullSatchelSale.OnClientInvoke = function(_) return true end
     end)
 end
 installOverride()
@@ -47,13 +46,36 @@ task.spawn(function()
 end)
 
 ------------------------------------------------------------
--- 2. Scan + unfavorite
+-- 2. Unequip all pets
+------------------------------------------------------------
+local function unequipAll()
+    local d = getSave()
+    if not d or type(d.EquippedAssets) ~= "table" or #d.EquippedAssets == 0 then
+        log("No equipped pets.")
+        return
+    end
+    log(("Unequipping %d pet(s)..."):format(#d.EquippedAssets))
+
+    local ok, AssetRoster = pcall(require, ReplicatedStorage.Client.AssetRoster)
+    for i, uid in ipairs(d.EquippedAssets) do
+        if ok and AssetRoster and AssetRoster.DoffAsset then
+            pcall(function() AssetRoster.DoffAsset(uid) end)
+        else
+            pcall(function() Remotes.PenRoster.AskDoff:InvokeServer(uid) end)
+        end
+        if i % 5 == 0 then task.wait(0.3) end
+    end
+    task.wait(1.0)
+end
+
+------------------------------------------------------------
+-- 3. Unfavorite all pets
 ------------------------------------------------------------
 local function getFavoriteUIDs()
     local list = {}
-    local data = getSave()
-    if not data or type(data.Inventory) ~= "table" then return list end
-    for uid, rec in pairs(data.Inventory) do
+    local d = getSave()
+    if not d or type(d.Inventory) ~= "table" then return list end
+    for uid, rec in pairs(d.Inventory) do
         local ok, item = TryCall(AssetItems.Decode, rec)
         if ok and item and item.IsFavorite == true then
             table.insert(list, uid)
@@ -65,101 +87,91 @@ end
 local function unfavoriteAll()
     local uids = getFavoriteUIDs()
     log(("Favorited pets found: %d"):format(#uids))
-    if #uids == 0 then return end
-
     for i, uid in ipairs(uids) do
-        -- Most likely signature: setter (uid, false)
-        pcall(function()
-            Remotes.PetSatchel.WriteFavourite:FireServer(uid, false)
-        end)
-        -- Belt-and-braces: also try batch-table form
-        pcall(function()
-            Remotes.PetSatchel.WriteFavourite:FireServer({ [uid] = false })
-        end)
+        pcall(function() Remotes.PetSatchel.WriteFavourite:FireServer(uid, false) end)
+        pcall(function() Remotes.PetSatchel.WriteFavourite:FireServer({ [uid] = false }) end)
         if i % 8 == 0 then task.wait(0.35) end
     end
     task.wait(1.0)
-    log("Unfavorite pass complete.")
 end
 
 ------------------------------------------------------------
--- 3. Selection builders
+-- 4. Build the payload as ARRAYS (this is the fix)
 ------------------------------------------------------------
-local function buildPetSelection()
-    local sel = {}
-    local data = getSave()
-    if not data or type(data.Inventory) ~= "table" then return sel end
-    for uid, rec in pairs(data.Inventory) do
-        local ok, item = TryCall(AssetItems.Decode, rec)
-        if ok and item and AssetDir[item.Category] and item.InFuse ~= true then
-            sel[uid] = true
-        end
-    end
-    return sel
-end
+local function buildPayload()
+    local pets = {}  -- array of pet UID strings
+    local eggs = {}  -- array of egg UID strings
 
-local function buildEggSelection()
-    local sel = {}
-    local data = getSave()
-    if not data or type(data.EggInventory) ~= "table" then return sel end
-    for uid, rec in pairs(data.EggInventory) do
-        if type(rec) == "table" and rec.Placement == nil then
-            local ok, dec = TryCall(EggRecords.Decode, rec)
-            if ok and dec and AssetDir[dec.AssetCategory] then
-                sel[uid] = true
+    local d = getSave()
+    if not d then return { Eggs = eggs, Assets = pets } end
+
+    if type(d.Inventory) == "table" then
+        for uid, rec in pairs(d.Inventory) do
+            local ok, item = TryCall(AssetItems.Decode, rec)
+            if ok and item
+                and AssetDir[item.Category]
+                and item.InFuse ~= true
+            then
+                table.insert(pets, uid)
             end
         end
     end
-    return sel
+
+    if type(d.EggInventory) == "table" then
+        for uid, rec in pairs(d.EggInventory) do
+            if type(rec) == "table" and rec.Placement == nil then
+                local ok, dec = TryCall(EggRecords.Decode, rec)
+                if ok and dec and AssetDir[dec.AssetCategory] then
+                    table.insert(eggs, uid)
+                end
+            end
+        end
+    end
+
+    return { Eggs = eggs, Assets = pets }
 end
 
 ------------------------------------------------------------
--- 4. Find the sell stand prompt
+-- 5. Find sell stand position (SellAll is a Part; prompt is inside)
 ------------------------------------------------------------
-local function findSellPrompt()
+local function findSellPosition()
     local stands = workspace:FindFirstChild("Stands")
     if not stands then return nil end
     local prompts = stands:FindFirstChild("Prompts")
     if not prompts then return nil end
-    return prompts:FindFirstChild("SellAll")
-        or prompts:FindFirstChild("SellHeldAsset")
-end
 
-local function getPromptWorldPos(prompt)
-    if not prompt then return nil end
-    local host = prompt.Parent
-    if host and host:IsA("BasePart") then return host.Position end
-    local adornee = prompt.Adornee
-    if adornee then
-        if adornee:IsA("BasePart") then return adornee.Position end
-        if adornee:IsA("Model") then
-            local prim = adornee.PrimaryPart
-                or adornee:FindFirstChildWhichIsA("BasePart")
-            if prim then return prim.Position end
-        end
+    local sellAll = prompts:FindFirstChild("SellAll")
+    if sellAll and sellAll:IsA("BasePart") then
+        return sellAll.Position
+    end
+
+    -- Fallback: any BasePart in the Prompts folder
+    for _, c in ipairs(prompts:GetChildren()) do
+        if c:IsA("BasePart") then return c.Position end
     end
     return nil
 end
 
 ------------------------------------------------------------
--- 5. Teleport, sell, teleport back
+-- 6. Teleport, fire, return
 ------------------------------------------------------------
 local function teleportAndSell()
-    local prompt = findSellPrompt()
-    if not prompt then
-        warn("[AutoSell] Sell stand not found — firing remotes anyway.")
-        Remotes.PetSatchel.SellEveryPet:FireServer()
-        task.wait(0.8)
-        Remotes.PetSatchel.SellSelection:FireServer(buildPetSelection())
-        task.wait(0.8)
-        Remotes.PetSatchel.SellSelection:FireServer(buildEggSelection())
+    local payload = buildPayload()
+    log(("Payload: %d pets (Assets), %d eggs"):format(
+        #payload.Assets, #payload.Eggs
+    ))
+
+    if #payload.Assets == 0 and #payload.Eggs == 0 then
+        log("Nothing to sell.")
         return
     end
 
-    local pos = getPromptWorldPos(prompt)
     local hrp = getHRP()
-    if not pos or not hrp then
-        warn("[AutoSell] Missing position or HumanoidRootPart.")
+    local pos = findSellPosition()
+    if not hrp or not pos then
+        warn("[AutoSell] Missing HRP or stand position — firing anyway.")
+        Remotes.PetSatchel.SellSelection:FireServer(payload)
+        task.wait(1.5)
         return
     end
 
@@ -168,39 +180,28 @@ local function teleportAndSell()
 
     hrp.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
     hrp.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.6) -- let server see our new position
+    task.wait(0.7)
 
-    -- Fire everything
-    pcall(function() Remotes.PetSatchel.SellEveryPet:FireServer() end)
-    task.wait(0.8)
-    pcall(function() Remotes.PetSatchel.SellSelection:FireServer(buildPetSelection()) end)
-    task.wait(0.8)
-    pcall(function() Remotes.PetSatchel.SellSelection:FireServer(buildEggSelection()) end)
-    task.wait(0.8)
-
-    -- Final fallback: trigger the actual ProximityPrompt
-    pcall(function()
-        if prompt:IsA("ProximityPrompt") then
-            prompt.Enabled = true
-            prompt:InputHoldBegin()
-            task.wait(math.max(0.3, prompt.HoldDuration + 0.1))
-            prompt:InputHoldEnd()
-        end
+    log("Firing PetSatchel.SellSelection ...")
+    local ok, err = pcall(function()
+        Remotes.PetSatchel.SellSelection:FireServer(payload)
     end)
-    task.wait(1.2)
+    if not ok then warn("[AutoSell] FireServer error:", err) end
+    task.wait(1.5)
 
     hrp.CFrame = savedCF
     pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
-    log("Done. Returned to original position.")
+    log("Returned.")
 end
 
 ------------------------------------------------------------
--- 6. Main
+-- 7. Main
 ------------------------------------------------------------
 local function run()
     local before = getMoney()
     log(("Wallet before: %s"):format(tostring(before)))
 
+    unequipAll()
     unfavoriteAll()
     teleportAndSell()
     task.wait(1.0)
@@ -214,8 +215,8 @@ run()
 
 pcall(function()
     StarterGui:SetCore("SendNotification", {
-        Title    = "Auto-Sell";
-        Text     = "Unfavorited and sold all pets + eggs.";
+        Title = "Auto-Sell";
+        Text  = "Unequipped, unfavorited, sold all pets + eggs.";
         Duration = 4;
     })
 end)
