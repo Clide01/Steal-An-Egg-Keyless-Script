@@ -11,7 +11,7 @@ local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 -- ===== CONFIG =====
 local MEME_IMAGE_ID = "rbxassetid://82403642047427"    -- texture ID
 local LAUGH_SOUND_ID = "rbxassetid://133312610824902"
-local MEME_DELAY     = 3
+local MEME_DELAY     = 4
 local MEME_SIZE      = 380
 -- ==================
 
