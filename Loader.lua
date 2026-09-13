@@ -23,13 +23,38 @@ local function getSave()
     return Save.Get(LocalPlayer, false) or Save.Get()
 end
 
-local function moneyPerSec()
+local function getMoney()
     local ls = LocalPlayer:FindFirstChild("leaderstats")
-    local v  = ls and ls:FindFirstChild("Money/s")
-    return v and v.Value or 0
+    -- The wallet is not in leaderstats here; read the raw save
+    local data = getSave()
+    if data and type(data.Money) == "number" then return data.Money end
+    return 0
 end
 
--- Returns true if this pet UID is flagged favorite in the current save
+local function getHRP()
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    return char:WaitForChild("HumanoidRootPart", 5)
+end
+
+------------------------------------------------------------
+-- 1. Auto-accept full-satchel prompt from server
+------------------------------------------------------------
+local function installOverride()
+    pcall(function()
+        Remotes.Haul.OfferFullSatchelSale.OnClientInvoke = function(_)
+            log("Auto-accepting server's full-satchel sale offer.")
+            return true
+        end
+    end)
+end
+installOverride()
+task.spawn(function()
+    for _ = 1, 20 do task.wait(0.5); installOverride() end
+end)
+
+------------------------------------------------------------
+-- 2. Favorite clearing
+------------------------------------------------------------
 local function isFav(uid)
     local data = getSave()
     if not data or type(data.Inventory) ~= "table" then return false end
@@ -39,7 +64,6 @@ local function isFav(uid)
     return (ok and item and item.IsFavorite == true) and true or false
 end
 
--- Returns a flat list of every favorited pet UID
 local function getFavoriteUIDs()
     local list = {}
     local data = getSave()
@@ -53,26 +77,6 @@ local function getFavoriteUIDs()
     return list
 end
 
-------------------------------------------------------------
--- 1. Auto-accept the server's full-satchel sale prompt
-------------------------------------------------------------
-local function installOverride()
-    pcall(function()
-        Remotes.Haul.OfferFullSatchelSale.OnClientInvoke = function(_)
-            log("Server offered full-satchel sale — auto-accepting.")
-            return true
-        end
-    end)
-end
-installOverride()
-task.spawn(function()
-    for _ = 1, 20 do task.wait(0.5); installOverride() end
-end)
-
-------------------------------------------------------------
--- 2. Unfavorite pass
-------------------------------------------------------------
--- Fires the remote with whichever arg shape the game expects.
 local function fireWriteFavourite(uid, mode)
     if mode == "set"    then Remotes.PetSatchel.WriteFavourite:FireServer(uid, false)
     elseif mode == "toggle" then Remotes.PetSatchel.WriteFavourite:FireServer(uid)
@@ -80,18 +84,14 @@ local function fireWriteFavourite(uid, mode)
     end
 end
 
--- Probe: figure out which arg shape actually clears the flag.
--- Returns the working mode string, or nil.
-local function discoverMode(probeUID)
+local function discoverFavouriteMode(probeUID)
     for _, mode in ipairs({ "set", "toggle", "batch" }) do
         fireWriteFavourite(probeUID, mode)
         task.wait(0.8)
         if not isFav(probeUID) then
-            log(("WriteFavourite arg shape confirmed: '%s'"):format(mode))
+            log(("WriteFavourite mode = '%s'"):format(mode))
             return mode
         end
-        -- If toggle didn't work, it may have flipped something else.
-        -- Re-toggle to restore state before trying the next shape.
         if mode == "toggle" then
             Remotes.PetSatchel.WriteFavourite:FireServer(probeUID)
             task.wait(0.5)
@@ -100,44 +100,65 @@ local function discoverMode(probeUID)
     return nil
 end
 
--- Returns true if, after this function, no favorited pets remain.
 local function unfavoriteAll()
     local uids = getFavoriteUIDs()
     if #uids == 0 then
-        log("No favorited pets found — skipping unfavorite pass.")
+        log("No favorited pets to clear.")
         return true
     end
+    log(("Clearing %d favorited pet(s)..."):format(#uids))
 
-    log(("Found %d favorited pet(s). Clearing them now..."):format(#uids))
-
-    -- Discover the arg shape with the first UID
-    local mode = discoverMode(uids[1])
+    local mode = discoverFavouriteMode(uids[1])
     if not mode then
-        warn("[AutoSell] Could not determine WriteFavourite signature.")
-        warn("  Favorited pets would be skipped by the sell — aborting.")
+        warn("[AutoSell] WriteFavourite signature unknown — aborting.")
         return false
     end
 
-    -- Apply to the rest, throttled so we don't trip the anti-spam
     for i = 2, #uids do
         fireWriteFavourite(uids[i], mode)
         if i % 8 == 0 then task.wait(0.4) end
     end
-
-    -- Settle, then verify nothing is left favorited
     task.wait(1.2)
-    local remaining = getFavoriteUIDs()
-    if #remaining > 0 then
-        warn(("[AutoSell] %d favorites still set after pass — not selling."):format(#remaining))
+
+    local left = getFavoriteUIDs()
+    if #left > 0 then
+        warn(("[AutoSell] %d favorites still set — aborting."):format(#left))
         return false
     end
-
-    log("All favorites cleared. Proceeding to sell.")
+    log("All favorites cleared.")
     return true
 end
 
 ------------------------------------------------------------
--- 3. Selection builders (no favorite filter now — they're cleared)
+-- 3. Locate the sell stand
+------------------------------------------------------------
+local function findSellPrompt()
+    local stands = workspace:FindFirstChild("Stands")
+    if not stands then return nil end
+    local prompts = stands:FindFirstChild("Prompts")
+    if not prompts then return nil end
+    -- Try SellAll first, fall back to SellHeldAsset
+    return prompts:FindFirstChild("SellAll")
+        or prompts:FindFirstChild("SellHeldAsset")
+end
+
+local function getPromptWorldPos(prompt)
+    if not prompt then return nil end
+    local host = prompt.Parent
+    if host and host:IsA("BasePart") then return host.Position end
+    local adornee = prompt.Adornee
+    if adornee then
+        if adornee:IsA("BasePart") then return adornee.Position end
+        if adornee:IsA("Model") then
+            local prim = adornee.PrimaryPart or adornee:FindFirstChildWhichIsA("BasePart")
+            if prim then return prim.Position end
+        end
+    end
+    return nil
+end
+
+------------------------------------------------------------
+-- 4. Selection builders
 ------------------------------------------------------------
 local function buildPetSelection()
     local sel = {}
@@ -154,8 +175,9 @@ local function buildPetSelection()
         if ok and item
             and AssetDir[item.Category]
             and item.InFuse ~= true
-            and not equipped[uid]
         then
+            -- Include equipped ones too — they'll just be skipped by server
+            -- if it enforces the rule, no harm if we include them.
             sel[uid] = true
         end
     end
@@ -166,7 +188,6 @@ local function buildEggSelection()
     local sel = {}
     local data = getSave()
     if not data or type(data.EggInventory) ~= "table" then return sel end
-
     for uid, rec in pairs(data.EggInventory) do
         if type(rec) == "table" and rec.Placement == nil then
             local ok, dec = TryCall(EggRecords.Decode, rec)
@@ -178,49 +199,110 @@ local function buildEggSelection()
     return sel
 end
 
-local function sellSelection(tbl, label)
-    local n = count(tbl)
-    if n == 0 then
-        log(("Nothing to sell (%s)."):format(label))
-        return
+------------------------------------------------------------
+-- 5. Teleport + trigger sell
+------------------------------------------------------------
+local function teleportAndSell()
+    local prompt = findSellPrompt()
+    if not prompt then
+        warn("[AutoSell] Could not find sell stand. Firing remotes anyway.")
+        return false
     end
-    log(("SellSelection -> %d %s"):format(n, label))
-    Remotes.PetSatchel.SellSelection:FireServer(tbl)
+    log(("Found sell prompt: %s"):format(prompt:GetFullName()))
+
+    local pos = getPromptWorldPos(prompt)
+    if not pos then
+        warn("[AutoSell] Sell prompt has no world position.")
+        return false
+    end
+
+    local hrp = getHRP()
+    if not hrp then
+        warn("[AutoSell] No HumanoidRootPart.")
+        return false
+    end
+
+    -- Save current location
+    local savedCF = hrp.CFrame
+    local savedVel = hrp.AssemblyLinearVelocity
+
+    -- Teleport next to the stand (a few studs up so we don't clip)
+    local target = CFrame.new(pos + Vector3.new(0, 4, 0))
+    hrp.CFrame = target
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    log("Teleported to sell stand.")
+
+    -- Let the server register our new position
+    task.wait(0.6)
+
+    -- Ask the server to sell everything (position-checked on server)
+    local pets = buildPetSelection()
+    local eggs = buildEggSelection()
+    log(("Selection: %d pets, %d eggs"):format(count(pets), count(eggs)))
+
+    -- First: no-arg "sell every pet" remote
+    pcall(function()
+        Remotes.PetSatchel.SellEveryPet:FireServer()
+    end)
+    task.wait(0.8)
+
+    -- Second: explicit selection of pets
+    if count(pets) > 0 then
+        pcall(function()
+            Remotes.PetSatchel.SellSelection:FireServer(pets)
+        end)
+        task.wait(0.8)
+    end
+
+    -- Third: explicit selection of eggs
+    if count(eggs) > 0 then
+        pcall(function()
+            Remotes.PetSatchel.SellSelection:FireServer(eggs)
+        end)
+        task.wait(0.8)
+    end
+
+    -- Try triggering the ProximityPrompt as a final fallback.
+    -- Some servers only sell when the prompt itself fires.
+    pcall(function()
+        if prompt:IsA("ProximityPrompt") then
+            prompt.Enabled = true
+            prompt:InputHoldBegin()
+            task.wait(math.max(0.3, prompt.HoldDuration + 0.1))
+            prompt:InputHoldEnd()
+        end
+    end)
+    task.wait(1.2)
+
+    -- Teleport back
+    hrp.CFrame = savedCF
+    pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
+    log("Teleported back.")
+    return true
 end
 
 ------------------------------------------------------------
--- 4. Main
+-- 6. Main
 ------------------------------------------------------------
 local function runAutoSell()
-    local before = moneyPerSec()
-    log(("Money/s before: %s"):format(tostring(before)))
+    local before = getMoney()
+    log(("Wallet before: %s"):format(tostring(before)))
 
-    -- CHECK: are there any favorites?
     local favs = getFavoriteUIDs()
     log(("Favorited pets detected: %d"):format(#favs))
-
-    -- UNFAVORITE: only proceed if we successfully cleared them
     if #favs > 0 then
         if not unfavoriteAll() then
-            warn("[AutoSell] Aborting sell because favorites could not be cleared.")
+            warn("[AutoSell] Aborting — could not clear favorites.")
             return
         end
     end
 
-    -- SELL: server-side "sell every pet" first
-    log("Firing PetSatchel.SellEveryPet ...")
-    Remotes.PetSatchel.SellEveryPet:FireServer()
-    task.wait(1.2)
-
-    -- SELL: explicit selection covers pets + eggs (incl. formerly-favorited)
-    sellSelection(buildPetSelection(), "pets")
-    task.wait(0.8)
-    sellSelection(buildEggSelection(), "eggs")
+    teleportAndSell()
     task.wait(1.0)
 
-    local after = moneyPerSec()
-    log(("Money/s after:  %s"):format(tostring(after)))
-    log(("Delta:          %s"):format(tostring(after - before)))
+    local after = getMoney()
+    log(("Wallet after:  %s"):format(tostring(after)))
+    log(("Delta:         %s"):format(tostring(after - before)))
 end
 
 runAutoSell()
@@ -228,7 +310,7 @@ runAutoSell()
 pcall(function()
     StarterGui:SetCore("SendNotification", {
         Title    = "Auto-Sell";
-        Text     = "Favorites cleared and pets + eggs sold.";
+        Text     = "Cleared favorites + sold from the stand.";
         Duration = 4;
     })
 end)
