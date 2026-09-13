@@ -3,15 +3,16 @@ local Players           = game:GetService("Players")
 local TweenService      = game:GetService("TweenService")
 local RunService        = game:GetService("RunService")
 local StarterGui        = game:GetService("StarterGui")
+local ContentProvider   = game:GetService("ContentProvider")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
 -- ===== CONFIG =====
-local MEME_IMAGE_ID = "rbxassetid://139464283735273"
+local MEME_IMAGE_ID = "rbxassetid://82403642047427"    -- texture ID
 local LAUGH_SOUND_ID = "rbxassetid://133312610824902"
-local MEME_DELAY     = 3       -- seconds after loading fades
-local MEME_SIZE      = 380     -- pixels, square
+local MEME_DELAY     = 3
+local MEME_SIZE      = 380
 -- ==================
 
 ------------------------------------------------------------
@@ -411,7 +412,7 @@ local function fadeOutAndCleanup()
 end
 
 ------------------------------------------------------------
--- MEME POPUP (cat + laugh)
+-- MEME POPUP
 ------------------------------------------------------------
 local function showMemePopup()
     local gui = Instance.new("ScreenGui")
@@ -425,13 +426,25 @@ local function showMemePopup()
     img.Name = "Cat"
     img.AnchorPoint = Vector2.new(0.5, 0.5)
     img.Position = UDim2.fromScale(0.5, 0.5)
-    img.Size = UDim2.fromOffset(0, 0)
+    img.Size = UDim2.fromOffset(MEME_SIZE, MEME_SIZE)
     img.BackgroundTransparency = 1
     img.Image = MEME_IMAGE_ID
     img.ScaleType = Enum.ScaleType.Fit
-    img.ImageTransparency = 0
+    img.ImageTransparency = 1
     img.Rotation = -6
     img.Parent = gui
+
+    -- Preload the image so it's ready
+    pcall(function() ContentProvider:PreloadAsync({ img }) end)
+
+    -- Wait up to 3s for load
+    local t0 = tick()
+    while not img.IsLoaded and tick() - t0 < 3 do
+        task.wait(0.05)
+    end
+    if not img.IsLoaded then
+        warn("[Meme] Image failed to load — check the texture ID.")
+    end
 
     local sound = Instance.new("Sound")
     sound.SoundId = LAUGH_SOUND_ID
@@ -440,31 +453,24 @@ local function showMemePopup()
     sound.Parent = gui
     sound:Play()
 
-    -- Bounce in
-    TweenService:Create(img, TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-        Size = UDim2.fromOffset(MEME_SIZE, MEME_SIZE),
+    -- Fade in
+    TweenService:Create(img, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        ImageTransparency = 0,
     }):Play()
 
-    -- Small wobble loop while it's on screen
+    -- Wobble
     task.spawn(function()
         while gui.Parent do
-            TweenService:Create(img, TweenInfo.new(0.18), {
-                Rotation = 6,
-            }):Play()
+            TweenService:Create(img, TweenInfo.new(0.18), { Rotation = 6 }):Play()
             task.wait(0.18)
-            TweenService:Create(img, TweenInfo.new(0.18), {
-                Rotation = -6,
-            }):Play()
+            TweenService:Create(img, TweenInfo.new(0.18), { Rotation = -6 }):Play()
             task.wait(0.18)
         end
     end)
 
-    -- Hold, then fade out
+    -- Hold for sound length (min 3s), then fade
     task.wait(math.max(3, sound.TimeLength > 0 and sound.TimeLength or 4))
-    TweenService:Create(img, TweenInfo.new(0.5), {
-        ImageTransparency = 1,
-        Size = UDim2.fromOffset(0, 0),
-    }):Play()
+    TweenService:Create(img, TweenInfo.new(0.5), { ImageTransparency = 1 }):Play()
     task.wait(0.6)
     gui:Destroy()
 end
@@ -479,7 +485,6 @@ task.spawn(function()
     task.wait(0.3)
     fadeOutAndCleanup()
 
-    -- 3-second delay after loading disappears
     task.wait(MEME_DELAY)
     showMemePopup()
 end)
