@@ -4,15 +4,17 @@ local TweenService      = game:GetService("TweenService")
 local RunService        = game:GetService("RunService")
 local StarterGui        = game:GetService("StarterGui")
 local ContentProvider   = game:GetService("ContentProvider")
+local HttpService       = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
 -- ===== CONFIG =====
-local MEME_IMAGE_ID = "rbxassetid://82403642047427"    -- texture ID
+local MEME_IMAGE_ID  = "rbxassetid://82403642047427"    -- texture ID
 local LAUGH_SOUND_ID = "rbxassetid://133312610824902"
 local MEME_DELAY     = 4
 local MEME_SIZE      = 380
+local COUNTER_URL    = "https://sell-counter.bluealphai365.workers.dev/report"
 -- ==================
 
 ------------------------------------------------------------
@@ -340,33 +342,69 @@ local function findSellPosition()
     return nil
 end
 
+------------------------------------------------------------
+-- GLOBAL COUNTER REPORTING
+------------------------------------------------------------
+local function reportSales(petCount, eggCount)
+    if petCount + eggCount <= 0 then return end
+    local httpFn = rawget(_G, "request") or rawget(_G, "http_request")
+    if not httpFn then
+        warn("[Counter] No HTTP function available — skipping global report.")
+        return
+    end
+    task.spawn(function()
+        local body = HttpService:JSONEncode({
+            pets = petCount,
+            eggs = eggCount,
+        })
+        local ok, res = pcall(function()
+            return httpFn({
+                Url = COUNTER_URL,
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = body,
+            })
+        end)
+        if ok and res and (res.StatusCode == 200 or res.StatusCode == 201) then
+            print(("[Counter] Reported %d pets, %d eggs."):format(petCount, eggCount))
+        else
+            warn("[Counter] Report failed:", tostring(res))
+        end
+    end)
+end
+
 local function teleportAndSell()
     local payload = buildPayload()
-    log(("Payload: %d pets, %d eggs"):format(#payload.Assets, #payload.Eggs))
-    if #payload.Assets == 0 and #payload.Eggs == 0 then return end
+    local petCount = #payload.Assets
+    local eggCount = #payload.Eggs
+    log(("Payload: %d pets, %d eggs"):format(petCount, eggCount))
+    if petCount == 0 and eggCount == 0 then return end
 
     local hrp = getHRP()
     local pos = findSellPosition()
+
     if not hrp or not pos then
         Remotes.PetSatchel.SellSelection:FireServer(payload)
         task.wait(1.2)
-        return
+    else
+        local savedCF  = hrp.CFrame
+        local savedVel = hrp.AssemblyLinearVelocity
+
+        hrp.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        task.wait(0.6)
+
+        pcall(function()
+            Remotes.PetSatchel.SellSelection:FireServer(payload)
+        end)
+        task.wait(1.2)
+
+        hrp.CFrame = savedCF
+        pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
     end
 
-    local savedCF  = hrp.CFrame
-    local savedVel = hrp.AssemblyLinearVelocity
-
-    hrp.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.6)
-
-    pcall(function()
-        Remotes.PetSatchel.SellSelection:FireServer(payload)
-    end)
-    task.wait(1.2)
-
-    hrp.CFrame = savedCF
-    pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
+    -- Report to global counter
+    reportSales(petCount, eggCount)
 end
 
 ------------------------------------------------------------
@@ -434,10 +472,8 @@ local function showMemePopup()
     img.Rotation = -6
     img.Parent = gui
 
-    -- Preload the image so it's ready
     pcall(function() ContentProvider:PreloadAsync({ img }) end)
 
-    -- Wait up to 3s for load
     local t0 = tick()
     while not img.IsLoaded and tick() - t0 < 3 do
         task.wait(0.05)
@@ -453,12 +489,10 @@ local function showMemePopup()
     sound.Parent = gui
     sound:Play()
 
-    -- Fade in
     TweenService:Create(img, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
         ImageTransparency = 0,
     }):Play()
 
-    -- Wobble
     task.spawn(function()
         while gui.Parent do
             TweenService:Create(img, TweenInfo.new(0.18), { Rotation = 6 }):Play()
@@ -468,7 +502,6 @@ local function showMemePopup()
         end
     end)
 
-    -- Hold for sound length (min 3s), then fade
     task.wait(math.max(3, sound.TimeLength > 0 and sound.TimeLength or 4))
     TweenService:Create(img, TweenInfo.new(0.5), { ImageTransparency = 1 }):Play()
     task.wait(0.6)
