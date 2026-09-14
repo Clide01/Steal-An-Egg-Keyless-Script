@@ -347,12 +347,25 @@ end
 ------------------------------------------------------------
 local function reportSales(petCount, eggCount)
     if petCount + eggCount <= 0 then return end
-    local httpFn = rawget(_G, "request") or rawget(_G, "http_request")
+
+    -- Delta exposes request on getgenv(), not _G
+    local httpFn = nil
+    local gv = getgenv and getgenv() or _G
+
+    if type(request) == "function" then
+        httpFn = request
+    elseif type(http_request) == "function" then
+        httpFn = http_request
+    elseif type(gv.request) == "function" then
+        httpFn = gv.request
+    elseif type(gv.http_request) == "function" then
+        httpFn = gv.http_request
+    end
+
     if not httpFn then
         warn("[Counter] No HTTP function available — skipping global report.")
         return
-    end
-    task.spawn(function()
+    end    task.spawn(function()
         local body = HttpService:JSONEncode({
             pets = petCount,
             eggs = eggCount,
