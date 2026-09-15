@@ -313,7 +313,6 @@ local function buildPayload()
     local d = getSave()
     if not d then return { Eggs = eggs, Assets = pets, Details = details, TotalValue = 0 } end
 
-    -- VIP doubles sale price (per the game's own code)
     local isVIP = LocalPlayer:GetAttribute("VIP") == true
 
     -- Pets
@@ -326,12 +325,16 @@ local function buildPayload()
                 local entry = AssetDir[item.Category]
                 local rarity = entry.Rarity
 
-                -- Sale value
+                -- Value
                 local priceOk, basePrice = TryCall(AssetItems.SalePrice, item)
                 local value = (priceOk and tonumber(basePrice)) or 0
                 if isVIP then value = value * 2 end
                 value = math.floor(value)
                 totalValue = totalValue + value
+
+                -- Weight
+                local weightOk, weight = TryCall(AssetItems.WeightKg, item)
+                weight = (weightOk and tonumber(weight)) or 0
 
                 table.insert(details, {
                     kind      = "pet",
@@ -341,6 +344,7 @@ local function buildPayload()
                     rarity    = (rarity and rarity.DisplayName) or "Unknown",
                     rarityNum = (rarity and rarity.RarityNumber) or 0,
                     value     = value,
+                    weight    = weight,
                 })
             end
         end
@@ -362,6 +366,9 @@ local function buildPayload()
                     value = math.floor(value)
                     totalValue = totalValue + value
 
+                    local weightOk, weight = TryCall(EggRecords.WeightKg, dec)
+                    weight = (weightOk and tonumber(weight)) or 0
+
                     table.insert(details, {
                         kind      = "egg",
                         uid       = uid,
@@ -370,6 +377,7 @@ local function buildPayload()
                         rarity    = (rarity and rarity.DisplayName) or "Unknown",
                         rarityNum = (rarity and rarity.RarityNumber) or 0,
                         value     = value,
+                        weight    = weight,
                     })
                 end
             end
@@ -423,6 +431,7 @@ local function reportSales(petCount, eggCount, details, totalValue)
             rarity    = d.rarity,
             rarityNum = d.rarityNum,
             value     = d.value,
+            weight    = d.weight,
         })
     end
 
