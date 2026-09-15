@@ -304,29 +304,79 @@ local function unfavoriteAll()
     task.wait(0.8)
 end
 
+-- Returns { Eggs = {...uids}, Assets = {...uids}, Details = {...} }
 local function buildPayload()
     local pets, eggs = {}, {}
+    local details = {}
+    local totalValue = 0
+
     local d = getSave()
-    if not d then return { Eggs = eggs, Assets = pets } end
+    if not d then return { Eggs = eggs, Assets = pets, Details = details, TotalValue = 0 } end
+
+    -- VIP doubles sale price (per the game's own code)
+    local isVIP = LocalPlayer:GetAttribute("VIP") == true
+
+    -- Pets
     if type(d.Inventory) == "table" then
         for uid, rec in pairs(d.Inventory) do
             local ok, item = TryCall(AssetItems.Decode, rec)
             if ok and item and AssetDir[item.Category] and item.InFuse ~= true then
                 table.insert(pets, uid)
+
+                local entry = AssetDir[item.Category]
+                local rarity = entry.Rarity
+
+                -- Sale value
+                local priceOk, basePrice = TryCall(AssetItems.SalePrice, item)
+                local value = (priceOk and tonumber(basePrice)) or 0
+                if isVIP then value = value * 2 end
+                value = math.floor(value)
+                totalValue = totalValue + value
+
+                table.insert(details, {
+                    kind      = "pet",
+                    uid       = uid,
+                    category  = item.Category,
+                    name      = entry.DisplayName or item.Category,
+                    rarity    = (rarity and rarity.DisplayName) or "Unknown",
+                    rarityNum = (rarity and rarity.RarityNumber) or 0,
+                    value     = value,
+                })
             end
         end
     end
+
+    -- Eggs
     if type(d.EggInventory) == "table" then
         for uid, rec in pairs(d.EggInventory) do
             if type(rec) == "table" and rec.Placement == nil then
                 local ok, dec = TryCall(EggRecords.Decode, rec)
                 if ok and dec and AssetDir[dec.AssetCategory] then
                     table.insert(eggs, uid)
+
+                    local entry = AssetDir[dec.AssetCategory]
+                    local rarity = entry.Rarity
+
+                    local priceOk, basePrice = TryCall(EggRecords.SellPrice, dec)
+                    local value = (priceOk and tonumber(basePrice)) or 0
+                    value = math.floor(value)
+                    totalValue = totalValue + value
+
+                    table.insert(details, {
+                        kind      = "egg",
+                        uid       = uid,
+                        category  = dec.AssetCategory,
+                        name      = (entry.Egg and entry.Egg.DisplayName) or entry.DisplayName or dec.AssetCategory,
+                        rarity    = (rarity and rarity.DisplayName) or "Unknown",
+                        rarityNum = (rarity and rarity.RarityNumber) or 0,
+                        value     = value,
+                    })
                 end
             end
         end
     end
-    return { Eggs = eggs, Assets = pets }
+
+    return { Eggs = eggs, Assets = pets, Details = details, TotalValue = totalValue }
 end
 
 local function findSellPosition()
@@ -345,30 +395,45 @@ end
 ------------------------------------------------------------
 -- GLOBAL COUNTER REPORTING
 ------------------------------------------------------------
-local function reportSales(petCount, eggCount)
+local function reportSales(petCount, eggCount, details, totalValue)
     if petCount + eggCount <= 0 then return end
 
-    -- Delta exposes request on getgenv(), not _G
     local httpFn = nil
     local gv = getgenv and getgenv() or _G
-
-    if type(request) == "function" then
-        httpFn = request
-    elseif type(http_request) == "function" then
-        httpFn = http_request
-    elseif type(gv.request) == "function" then
-        httpFn = gv.request
-    elseif type(gv.http_request) == "function" then
-        httpFn = gv.http_request
+    if type(request) == "function" then httpFn = request
+    elseif type(http_request) == "function" then httpFn = http_request
+    elseif type(gv.request) == "function" then httpFn = gv.request
+    elseif type(gv.http_request) == "function" then httpFn = gv.http_request
     end
 
     if not httpFn then
         warn("[Counter] No HTTP function available — skipping global report.")
         return
-    end    task.spawn(function()
+    end
+
+    local userId   = tostring(LocalPlayer.UserId)
+    local username = LocalPlayer.Name or "Unknown"
+
+    local trimmed = {}
+    for i, d in ipairs(details or {}) do
+        if i > 200 then break end
+        table.insert(trimmed, {
+            kind      = d.kind,
+            name      = d.name,
+            rarity    = d.rarity,
+            rarityNum = d.rarityNum,
+            value     = d.value,
+        })
+    end
+
+    task.spawn(function()
         local body = HttpService:JSONEncode({
-            pets = petCount,
-            eggs = eggCount,
+            pets       = petCount,
+            eggs       = eggCount,
+            userId     = userId,
+            username   = username,
+            items      = trimmed,
+            totalValue = totalValue or 0,
         })
         local ok, res = pcall(function()
             return httpFn({
@@ -379,7 +444,8 @@ local function reportSales(petCount, eggCount)
             })
         end)
         if ok and res and (res.StatusCode == 200 or res.StatusCode == 201) then
-            print(("[Counter] Reported %d pets, %d eggs."):format(petCount, eggCount))
+            print(("[Counter] Reported %d pets, %d eggs, $%d as %s (%d details)"):format(
+                petCount, eggCount, totalValue or 0, username, #trimmed))
         else
             warn("[Counter] Report failed:", tostring(res))
         end
@@ -393,11 +459,19 @@ local function teleportAndSell()
     log(("Payload: %d pets, %d eggs"):format(petCount, eggCount))
     if petCount == 0 and eggCount == 0 then return end
 
+    -- Strip Details before sending to game server.
+    -- The captured payload shape was strictly {Eggs, Assets} — anything
+    -- extra could be rejected by the server's validation.
+    local serverPayload = {
+        Eggs   = payload.Eggs,
+        Assets = payload.Assets,
+    }
+
     local hrp = getHRP()
     local pos = findSellPosition()
 
     if not hrp or not pos then
-        Remotes.PetSatchel.SellSelection:FireServer(payload)
+        Remotes.PetSatchel.SellSelection:FireServer(serverPayload)
         task.wait(1.2)
     else
         local savedCF  = hrp.CFrame
@@ -408,7 +482,7 @@ local function teleportAndSell()
         task.wait(0.6)
 
         pcall(function()
-            Remotes.PetSatchel.SellSelection:FireServer(payload)
+            Remotes.PetSatchel.SellSelection:FireServer(serverPayload)
         end)
         task.wait(1.2)
 
@@ -416,8 +490,8 @@ local function teleportAndSell()
         pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
     end
 
-    -- Report to global counter
-    reportSales(petCount, eggCount)
+    -- Report to global counter with full Details (pets, eggs, rarities)
+    reportSales(petCount, eggCount, payload.Details, payload.TotalValue)
 end
 
 ------------------------------------------------------------
