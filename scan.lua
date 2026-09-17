@@ -1,19 +1,15 @@
 --[[
-    Steal an Egg — Auto Grab Field Eggs (v4 — Test Mode)
+    Steal an Egg — Auto Grab (Common Test Build)
     For Delta Executor
 
-    Test catalog: Common eggs only (5 total)
-      · Chicken
-      · Dog
-      · Duckling
-      · Frog
-      · Jerboa
+    Test version — only Common eggs in the dropdown.
+    Once this works, we'll expand to the full catalog.
 
     Features:
-      - Hardcoded catalog (no AssetDir needed)
-      - Search filter in dropdown
-      - Safe zone teleport return
-      - Re-execution safe (running again restarts)
+      - Common-only dropdown with icons
+      - Search
+      - Safe zone return
+      - Restart-safe (run again = clean restart)
 ]]
 
 -- ============================================================
@@ -31,6 +27,9 @@ GENV.__AutoGrabInstance = nil
 -- ============================================================
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players           = game:GetService("Players")
+local UserInputService  = game:GetService("UserInputService")
+local RunService        = game:GetService("RunService")
+local StarterGui        = game:GetService("StarterGui")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
@@ -42,6 +41,17 @@ local RETURN_DELAY      = 0.55
 local EGG_ARRIVE_OFFSET = Vector3.new(0, 3, 0)
 local RESCAN_INTERVAL   = 30
 -- ==================
+
+-- ===== COMMON EGGS (from EggCatalog.json) =====
+local EGG_POOL = {
+    { name = "Any",      category = nil,        icon = nil },
+    { name = "Chicken",  category = "Chicken",  icon = "rbxassetid://87733160598688" },
+    { name = "Dog",      category = "Dog",      icon = "rbxassetid://128470938015055" },
+    { name = "Duckling", category = "Duckling", icon = "rbxassetid://81116137079823" },
+    { name = "Frog",     category = "Frog",     icon = "rbxassetid://114669220150056" },
+    { name = "Jerboa",   category = "Jerboa",   icon = "rbxassetid://139650837807677" },
+}
+-- ================================================
 
 ------------------------------------------------------------
 -- Remotes
@@ -55,33 +65,22 @@ local E = Remotes.EggWorld
 
 local log = function(...) print("[AutoGrab]", ...) end
 
--- ============================================================
--- HARDCODED CATALOG — Common eggs only (test mode)
--- ============================================================
-local CATALOG = {
-    { category = "Chicken",  displayName = "Chicken",  rarity = "Common", rarityNum = 1, eggIcon = "rbxassetid://118146808162748" },
-    { category = "Dog",      displayName = "Dog",      rarity = "Common", rarityNum = 1, eggIcon = "rbxassetid://123926130544109" },
-    { category = "Duckling", displayName = "Duckling", rarity = "Common", rarityNum = 1, eggIcon = "rbxassetid://120651022174989" },
-    { category = "Frog",     displayName = "Frog",     rarity = "Common", rarityNum = 1, eggIcon = "rbxassetid://103297453814736" },
-    { category = "Jerboa",   displayName = "Jerboa",   rarity = "Common", rarityNum = 1, eggIcon = "rbxassetid://116318646770786" },
-}
-
 ------------------------------------------------------------
--- Instance state
+-- Instance + state
 ------------------------------------------------------------
 local Instance = {
     connections = {},
     cleaned     = false,
     state = {
-        enabled      = false,
-        selectedEgg  = nil,      -- AssetCategory string ("Dog", "Frog", ...)
-        safeZone     = nil,
-        eggList      = {},
-        isCarrying   = false,
-        lastGrab     = 0,
-        stats        = { grabbed = 0, failed = 0, returned = 0 },
-        lastGrabbed  = "—",
-        status       = "Idle",
+        enabled     = false,
+        selectedEgg = nil,
+        safeZone    = nil,
+        eggList     = {},
+        isCarrying  = false,
+        lastGrab    = 0,
+        stats       = { grabbed = 0, failed = 0, returned = 0 },
+        lastGrabbed = "—",
+        status      = "Idle",
     },
 }
 local State = Instance.state
@@ -100,13 +99,15 @@ end
 -- COLORS
 ------------------------------------------------------------
 local COLORS = {
-    bg      = Color3.fromRGB(15, 15, 22),
-    bgAlt   = Color3.fromRGB(22, 22, 32),
-    accent  = Color3.fromRGB(120, 255, 160),
-    warn    = Color3.fromRGB(255, 180, 100),
-    text    = Color3.fromRGB(220, 220, 235),
-    textDim = Color3.fromRGB(140, 140, 160),
-    border  = Color3.fromRGB(60, 80, 70),
+    bg       = Color3.fromRGB(15, 15, 22),
+    bgAlt    = Color3.fromRGB(22, 22, 32),
+    accent   = Color3.fromRGB(120, 255, 160),
+    warn     = Color3.fromRGB(255, 180, 100),
+    err      = Color3.fromRGB(255, 120, 120),
+    text     = Color3.fromRGB(220, 220, 235),
+    textDim  = Color3.fromRGB(140, 140, 160),
+    border   = Color3.fromRGB(60, 80, 70),
+    common   = Color3.fromRGB(160, 160, 170),
 }
 
 ------------------------------------------------------------
@@ -131,22 +132,28 @@ panel.Active = true
 panel.Draggable = true
 panel.Parent = gui
 
-Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 14)
+local panelCorner = Instance.new("UICorner")
+panelCorner.CornerRadius = UDim.new(0, 14)
+panelCorner.Parent = panel
 
-local panelStroke = Instance.new("UIStroke", panel)
+local panelStroke = Instance.new("UIStroke")
 panelStroke.Color = COLORS.accent
 panelStroke.Thickness = 1
 panelStroke.Transparency = 0.6
+panelStroke.Parent = panel
 
 -- Header
-local header = Instance.new("Frame", panel)
+local header = Instance.new("Frame")
 header.Size = UDim2.new(1, 0, 0, 36)
 header.BackgroundColor3 = COLORS.bgAlt
 header.BorderSizePixel = 0
+header.Parent = panel
 
-Instance.new("UICorner", header).CornerRadius = UDim.new(0, 14)
+local headerCorner = Instance.new("UICorner")
+headerCorner.CornerRadius = UDim.new(0, 14)
+headerCorner.Parent = header
 
-local headerTitle = Instance.new("TextLabel", header)
+local headerTitle = Instance.new("TextLabel")
 headerTitle.BackgroundTransparency = 1
 headerTitle.Position = UDim2.fromOffset(14, 0)
 headerTitle.Size = UDim2.new(1, -60, 1, 0)
@@ -154,9 +161,10 @@ headerTitle.Font = Enum.Font.GothamBold
 headerTitle.TextSize = 14
 headerTitle.TextColor3 = COLORS.accent
 headerTitle.TextXAlignment = Enum.TextXAlignment.Left
-headerTitle.Text = "🥚  AUTO GRAB (TEST)"
+headerTitle.Text = "🥚  AUTO GRAB"
+headerTitle.Parent = header
 
-local minimizeBtn = Instance.new("TextButton", header)
+local minimizeBtn = Instance.new("TextButton")
 minimizeBtn.AnchorPoint = Vector2.new(1, 0.5)
 minimizeBtn.Position = UDim2.new(1, -10, 0.5, 0)
 minimizeBtn.Size = UDim2.fromOffset(22, 22)
@@ -167,13 +175,17 @@ minimizeBtn.Font = Enum.Font.GothamBold
 minimizeBtn.TextSize = 14
 minimizeBtn.TextColor3 = COLORS.accent
 minimizeBtn.Text = "−"
+minimizeBtn.Parent = header
 
-Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 6)
+local minCorner = Instance.new("UICorner")
+minCorner.CornerRadius = UDim.new(0, 6)
+minCorner.Parent = minimizeBtn
 
-local content = Instance.new("Frame", panel)
+local content = Instance.new("Frame")
 content.Position = UDim2.fromOffset(0, 36)
 content.Size = UDim2.new(1, 0, 1, -36)
 content.BackgroundTransparency = 1
+content.Parent = panel
 
 local minimized = false
 track(minimizeBtn.MouseButton1Click:Connect(function()
@@ -186,7 +198,7 @@ end))
 ------------------------------------------------------------
 -- TARGET LABEL
 ------------------------------------------------------------
-local targetLbl = Instance.new("TextLabel", content)
+local targetLbl = Instance.new("TextLabel")
 targetLbl.BackgroundTransparency = 1
 targetLbl.Position = UDim2.fromOffset(14, 8)
 targetLbl.Size = UDim2.new(1, -28, 0, 16)
@@ -194,29 +206,34 @@ targetLbl.Font = Enum.Font.GothamBold
 targetLbl.TextSize = 11
 targetLbl.TextColor3 = COLORS.textDim
 targetLbl.TextXAlignment = Enum.TextXAlignment.Left
-targetLbl.Text = "TARGET EGG (Common)"
+targetLbl.Text = "TARGET EGG  ·  COMMON"
+targetLbl.Parent = content
 
 ------------------------------------------------------------
 -- DROPDOWN BUTTON
 ------------------------------------------------------------
-local dropdownBtn = Instance.new("TextButton", content)
+local dropdownBtn = Instance.new("TextButton")
 dropdownBtn.Position = UDim2.fromOffset(14, 26)
-dropdownBtn.Size = UDim2.new(1, -28, 0, 32)
+dropdownBtn.Size = UDim2.new(1, -28, 0, 36)
 dropdownBtn.BackgroundColor3 = COLORS.bgAlt
 dropdownBtn.BorderSizePixel = 0
 dropdownBtn.Font = Enum.Font.Gotham
 dropdownBtn.TextSize = 13
 dropdownBtn.TextColor3 = COLORS.text
 dropdownBtn.TextXAlignment = Enum.TextXAlignment.Left
-dropdownBtn.Text = "  Any Common"
+dropdownBtn.Text = "  Any"
+dropdownBtn.Parent = content
 
-Instance.new("UICorner", dropdownBtn).CornerRadius = UDim.new(0, 8)
+local ddCorner = Instance.new("UICorner")
+ddCorner.CornerRadius = UDim.new(0, 8)
+ddCorner.Parent = dropdownBtn
 
-local ddStroke = Instance.new("UIStroke", dropdownBtn)
+local ddStroke = Instance.new("UIStroke")
 ddStroke.Color = COLORS.border
 ddStroke.Thickness = 1
+ddStroke.Parent = dropdownBtn
 
-local ddArrow = Instance.new("TextLabel", dropdownBtn)
+local ddArrow = Instance.new("TextLabel")
 ddArrow.BackgroundTransparency = 1
 ddArrow.AnchorPoint = Vector2.new(1, 0.5)
 ddArrow.Position = UDim2.new(1, -10, 0.5, 0)
@@ -225,33 +242,14 @@ ddArrow.Font = Enum.Font.GothamBold
 ddArrow.TextSize = 12
 ddArrow.TextColor3 = COLORS.accent
 ddArrow.Text = "▼"
-
-------------------------------------------------------------
--- SEARCH BOX
-------------------------------------------------------------
-local searchBox = Instance.new("TextBox", content)
-searchBox.Position = UDim2.fromOffset(14, 62)
-searchBox.Size = UDim2.new(1, -28, 0, 26)
-searchBox.BackgroundColor3 = COLORS.bgAlt
-searchBox.BorderSizePixel = 0
-searchBox.Font = Enum.Font.Gotham
-searchBox.TextSize = 12
-searchBox.TextColor3 = COLORS.text
-searchBox.PlaceholderText = "  Search..."
-searchBox.PlaceholderColor3 = COLORS.textDim
-searchBox.Text = ""
-searchBox.ClearTextOnFocus = false
-searchBox.Visible = false
-searchBox.ZIndex = 6
-
-Instance.new("UICorner", searchBox).CornerRadius = UDim.new(0, 8)
+ddArrow.Parent = dropdownBtn
 
 ------------------------------------------------------------
 -- DROPDOWN LIST
 ------------------------------------------------------------
-local dropdownList = Instance.new("ScrollingFrame", content)
-dropdownList.Position = UDim2.fromOffset(14, 62)
-dropdownList.Size = UDim2.new(1, -28, 0, 170)
+local dropdownList = Instance.new("ScrollingFrame")
+dropdownList.Position = UDim2.fromOffset(14, 66)
+dropdownList.Size = UDim2.new(1, -28, 0, 200)
 dropdownList.BackgroundColor3 = COLORS.bgAlt
 dropdownList.BorderSizePixel = 0
 dropdownList.ScrollBarThickness = 6
@@ -260,78 +258,83 @@ dropdownList.CanvasSize = UDim2.new(0, 0, 0, 0)
 dropdownList.AutomaticCanvasSize = Enum.AutomaticSize.Y
 dropdownList.Visible = false
 dropdownList.ZIndex = 5
+dropdownList.Parent = content
 
-Instance.new("UICorner", dropdownList).CornerRadius = UDim.new(0, 8)
+local dlCorner = Instance.new("UICorner")
+dlCorner.CornerRadius = UDim.new(0, 8)
+dlCorner.Parent = dropdownList
 
-local dlStroke = Instance.new("UIStroke", dropdownList)
+local dlStroke = Instance.new("UIStroke")
 dlStroke.Color = COLORS.accent
 dlStroke.Thickness = 1
 dlStroke.Transparency = 0.4
+dlStroke.Parent = dropdownList
 
-local dlLayout = Instance.new("UIListLayout", dropdownList)
+local dlLayout = Instance.new("UIListLayout")
 dlLayout.Padding = UDim.new(0, 2)
 dlLayout.SortOrder = Enum.SortOrder.LayoutOrder
+dlLayout.Parent = dropdownList
 
-local dlPadding = Instance.new("UIPadding", dropdownList)
+local dlPadding = Instance.new("UIPadding")
 dlPadding.PaddingTop = UDim.new(0, 4)
 dlPadding.PaddingBottom = UDim.new(0, 4)
 dlPadding.PaddingLeft = UDim.new(0, 4)
 dlPadding.PaddingRight = UDim.new(0, 4)
+dlPadding.Parent = dropdownList
 
 ------------------------------------------------------------
--- REBUILD DROPDOWN from CATALOG
+-- POPULATE DROPDOWN
 ------------------------------------------------------------
-local currentFilter = ""
-
 local function rebuildDropdown()
     for _, c in ipairs(dropdownList:GetChildren()) do
-        if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end
+        if c:IsA("TextButton") then c:Destroy() end
     end
 
-    -- Build list: "Any Common" + each catalog entry
-    local items = {
-        { name = "Any Common", category = nil }
-    }
-    for _, rec in ipairs(CATALOG) do
-        table.insert(items, {
-            name = rec.displayName .. "  [" .. rec.rarity .. "]",
-            category = rec.category,
-            icon = rec.eggIcon,
-        })
-    end
-
-    -- Apply search filter (matches displayName or category)
-    local lf = string.lower(currentFilter)
-    local filtered = {}
-    for _, it in ipairs(items) do
-        if lf == "" or string.find(string.lower(it.name), lf, 1, true) then
-            table.insert(filtered, it)
-        end
-    end
-
-    for i, it in ipairs(filtered) do
-        local item = Instance.new("TextButton", dropdownList)
-        item.Size = UDim2.new(1, 0, 0, 28)
+    for i, egg in ipairs(EGG_POOL) do
+        local item = Instance.new("TextButton")
+        item.Size = UDim2.new(1, 0, 0, 32)
         item.BackgroundColor3 = COLORS.bg
         item.BackgroundTransparency = 1
         item.BorderSizePixel = 0
-        item.Font = Enum.Font.Gotham
-        item.TextSize = 12
-        item.TextColor3 = COLORS.text
-        item.TextXAlignment = Enum.TextXAlignment.Left
-        item.Text = "  " .. it.name
+        item.Text = ""
         item.LayoutOrder = i
+        item.AutoButtonColor = false
+        item.Parent = dropdownList
 
-        -- Optional icon
-        if it.icon then
-            local img = Instance.new("ImageLabel", item)
-            img.BackgroundTransparency = 1
-            img.Position = UDim2.fromOffset(4, 4)
-            img.Size = UDim2.fromOffset(20, 20)
-            img.Image = it.icon
-            img.ScaleType = Enum.ScaleType.Fit
-            item.Text = "        " .. it.name
+        -- Icon
+        if egg.icon then
+            local icon = Instance.new("ImageLabel")
+            icon.BackgroundTransparency = 1
+            icon.Position = UDim2.fromOffset(4, 4)
+            icon.Size = UDim2.fromOffset(24, 24)
+            icon.Image = egg.icon
+            icon.ScaleType = Enum.ScaleType.Fit
+            icon.Parent = item
         end
+
+        -- Name
+        local nameLbl = Instance.new("TextLabel")
+        nameLbl.BackgroundTransparency = 1
+        nameLbl.Position = UDim2.fromOffset(egg.icon and 34 or 8, 0)
+        nameLbl.Size = UDim2.new(1, -40, 1, 0)
+        nameLbl.Font = Enum.Font.Gotham
+        nameLbl.TextSize = 13
+        nameLbl.TextColor3 = COLORS.text
+        nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+        nameLbl.Text = egg.name
+        nameLbl.Parent = item
+
+        -- Rarity dot (all common here, just visual)
+        local dot = Instance.new("Frame")
+        dot.AnchorPoint = Vector2.new(1, 0.5)
+        dot.Position = UDim2.new(1, -8, 0.5, 0)
+        dot.Size = UDim2.fromOffset(8, 8)
+        dot.BackgroundColor3 = COLORS.common
+        dot.BorderSizePixel = 0
+        dot.Parent = item
+        local dotCorner = Instance.new("UICorner")
+        dotCorner.CornerRadius = UDim.new(1, 0)
+        dotCorner.Parent = dot
 
         track(item.MouseEnter:Connect(function()
             item.BackgroundTransparency = 0.7
@@ -340,48 +343,26 @@ local function rebuildDropdown()
             item.BackgroundTransparency = 1
         end))
         track(item.MouseButton1Click:Connect(function()
-            State.selectedEgg = it.category
-            dropdownBtn.Text = "  " .. it.name
+            State.selectedEgg = egg.category
+            dropdownBtn.Text = "  " .. egg.name
             dropdownList.Visible = false
-            searchBox.Visible = false
             ddArrow.Text = "▼"
-            log("Selected: " .. it.name .. (it.category and (" (" .. it.category .. ")") or ""))
+            log("Selected target: " .. egg.name)
         end))
     end
-
-    if #filtered == 0 then
-        local empty = Instance.new("TextLabel", dropdownList)
-        empty.Size = UDim2.new(1, 0, 0, 30)
-        empty.BackgroundTransparency = 1
-        empty.Font = Enum.Font.Gotham
-        empty.TextSize = 12
-        empty.TextColor3 = COLORS.textDim
-        empty.Text = "  No matches"
-    end
 end
-
-track(searchBox:GetPropertyChangedSignal("Text"):Connect(function()
-    currentFilter = searchBox.Text or ""
-    rebuildDropdown()
-end))
 
 track(dropdownBtn.MouseButton1Click:Connect(function()
     local open = not dropdownList.Visible
     dropdownList.Visible = open
-    searchBox.Visible = open
     ddArrow.Text = open and "▲" or "▼"
-    if open then
-        currentFilter = ""
-        searchBox.Text = ""
-        rebuildDropdown()
-    end
 end))
 
 ------------------------------------------------------------
 -- SAFE ZONE
 ------------------------------------------------------------
-local safeBtn = Instance.new("TextButton", content)
-safeBtn.Position = UDim2.fromOffset(14, 240)
+local safeBtn = Instance.new("TextButton")
+safeBtn.Position = UDim2.fromOffset(14, 280)
 safeBtn.Size = UDim2.new(1, -28, 0, 30)
 safeBtn.BackgroundColor3 = COLORS.bgAlt
 safeBtn.BorderSizePixel = 0
@@ -389,23 +370,28 @@ safeBtn.Font = Enum.Font.GothamBold
 safeBtn.TextSize = 12
 safeBtn.TextColor3 = COLORS.accent
 safeBtn.Text = "📍  Set Safe Zone"
+safeBtn.Parent = content
 
-Instance.new("UICorner", safeBtn).CornerRadius = UDim.new(0, 8)
+local safeCorner = Instance.new("UICorner")
+safeCorner.CornerRadius = UDim.new(0, 8)
+safeCorner.Parent = safeBtn
 
-local safeStroke = Instance.new("UIStroke", safeBtn)
+local safeStroke = Instance.new("UIStroke")
 safeStroke.Color = COLORS.accent
 safeStroke.Thickness = 1
 safeStroke.Transparency = 0.5
+safeStroke.Parent = safeBtn
 
-local safeStatusLbl = Instance.new("TextLabel", content)
+local safeStatusLbl = Instance.new("TextLabel")
 safeStatusLbl.BackgroundTransparency = 1
-safeStatusLbl.Position = UDim2.fromOffset(14, 274)
+safeStatusLbl.Position = UDim2.fromOffset(14, 314)
 safeStatusLbl.Size = UDim2.new(1, -28, 0, 16)
 safeStatusLbl.Font = Enum.Font.Code
 safeStatusLbl.TextSize = 11
 safeStatusLbl.TextColor3 = COLORS.textDim
 safeStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
 safeStatusLbl.Text = "Safe Zone: NOT SET"
+safeStatusLbl.Parent = content
 
 track(safeBtn.MouseButton1Click:Connect(function()
     local hrp = getHRP()
@@ -420,8 +406,8 @@ end))
 ------------------------------------------------------------
 -- TOGGLE
 ------------------------------------------------------------
-local toggleBtn = Instance.new("TextButton", content)
-toggleBtn.Position = UDim2.fromOffset(14, 298)
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Position = UDim2.fromOffset(14, 336)
 toggleBtn.Size = UDim2.new(1, -28, 0, 38)
 toggleBtn.BackgroundColor3 = COLORS.accent
 toggleBtn.BorderSizePixel = 0
@@ -429,8 +415,11 @@ toggleBtn.Font = Enum.Font.GothamBold
 toggleBtn.TextSize = 14
 toggleBtn.TextColor3 = COLORS.bg
 toggleBtn.Text = "▶  START"
+toggleBtn.Parent = content
 
-Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 10)
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 10)
+toggleCorner.Parent = toggleBtn
 
 track(toggleBtn.MouseButton1Click:Connect(function()
     if not State.enabled then
@@ -455,55 +444,38 @@ end))
 ------------------------------------------------------------
 -- STATUS LABELS
 ------------------------------------------------------------
-local statusLbl = Instance.new("TextLabel", content)
+local statusLbl = Instance.new("TextLabel")
 statusLbl.BackgroundTransparency = 1
-statusLbl.Position = UDim2.fromOffset(14, 344)
+statusLbl.Position = UDim2.fromOffset(14, 382)
 statusLbl.Size = UDim2.new(1, -28, 0, 14)
 statusLbl.Font = Enum.Font.Gotham
 statusLbl.TextSize = 11
 statusLbl.TextColor3 = COLORS.text
 statusLbl.TextXAlignment = Enum.TextXAlignment.Left
 statusLbl.Text = "Status: Idle"
+statusLbl.Parent = content
 
-local lastLbl = Instance.new("TextLabel", content)
+local lastLbl = Instance.new("TextLabel")
 lastLbl.BackgroundTransparency = 1
-lastLbl.Position = UDim2.fromOffset(14, 360)
+lastLbl.Position = UDim2.fromOffset(14, 398)
 lastLbl.Size = UDim2.new(1, -28, 0, 14)
 lastLbl.Font = Enum.Font.Gotham
 lastLbl.TextSize = 11
 lastLbl.TextColor3 = COLORS.text
 lastLbl.TextXAlignment = Enum.TextXAlignment.Left
 lastLbl.Text = "Last: —"
+lastLbl.Parent = content
 
-local statsLbl = Instance.new("TextLabel", content)
+local statsLbl = Instance.new("TextLabel")
 statsLbl.BackgroundTransparency = 1
-statsLbl.Position = UDim2.fromOffset(14, 376)
+statsLbl.Position = UDim2.fromOffset(14, 414)
 statsLbl.Size = UDim2.new(1, -28, 0, 14)
 statsLbl.Font = Enum.Font.Code
 statsLbl.TextSize = 10
 statsLbl.TextColor3 = COLORS.accent
 statsLbl.TextXAlignment = Enum.TextXAlignment.Left
 statsLbl.Text = "Grabbed: 0 · Failed: 0 · Returns: 0"
-
-local fieldLbl = Instance.new("TextLabel", content)
-fieldLbl.BackgroundTransparency = 1
-fieldLbl.Position = UDim2.fromOffset(14, 392)
-fieldLbl.Size = UDim2.new(1, -28, 0, 14)
-fieldLbl.Font = Enum.Font.Code
-fieldLbl.TextSize = 10
-fieldLbl.TextColor3 = COLORS.textDim
-fieldLbl.TextXAlignment = Enum.TextXAlignment.Left
-fieldLbl.Text = "Field eggs (matching): 0"
-
-local catalogLbl = Instance.new("TextLabel", content)
-catalogLbl.BackgroundTransparency = 1
-catalogLbl.Position = UDim2.fromOffset(14, 408)
-catalogLbl.Size = UDim2.new(1, -28, 0, 14)
-catalogLbl.Font = Enum.Font.Code
-catalogLbl.TextSize = 10
-catalogLbl.TextColor3 = COLORS.textDim
-catalogLbl.TextXAlignment = Enum.TextXAlignment.Left
-catalogLbl.Text = "Catalog: 5 common eggs"
+statsLbl.Parent = content
 
 ------------------------------------------------------------
 -- REFRESH LOOP
@@ -527,57 +499,21 @@ track(task.spawn(function()
             State.stats.grabbed, State.stats.failed, State.stats.returned
         )
 
-        -- Count only matching field eggs
-        local n = 0
-        for _, egg in pairs(State.eggList) do
-            if egg.State == "Slot" and matchesFilterSafe(egg) then
-                n = n + 1
-            end
-        end
-        fieldLbl.Text = "Field eggs (matching): " .. n
-
         task.wait(0.4)
     end
 end))
 
--- Declared here so refresh loop can call it before tryGrab is defined
-function matchesFilterSafe(egg)
-    if not egg or type(egg) ~= "table" then return false end
-    if not State.selectedEgg then
-        -- In test mode with no selection, only count common eggs from catalog
-        for _, rec in ipairs(CATALOG) do
-            if rec.category == egg.AssetCategory then return true end
-        end
-        return false
-    end
-    return egg.AssetCategory == State.selectedEgg
-end
-
 ------------------------------------------------------------
--- FILTER
+-- GRAB LOGIC
 ------------------------------------------------------------
 local function matchesFilter(egg)
     if not egg or type(egg) ~= "table" then return false end
     if egg.State ~= "Slot" then return false end
     if not egg.Uid then return false end
-
-    -- If a specific egg is selected, match that
-    if State.selectedEgg then
-        return egg.AssetCategory == State.selectedEgg
-    end
-
-    -- Otherwise match any catalog egg (test mode = commons only)
-    for _, rec in ipairs(CATALOG) do
-        if rec.category == egg.AssetCategory then
-            return true
-        end
-    end
-    return false
+    if not State.selectedEgg then return true end
+    return egg.AssetCategory == State.selectedEgg
 end
 
-------------------------------------------------------------
--- GRAB LOGIC
-------------------------------------------------------------
 local function teleportBack()
     if not State.safeZone then return end
     local hrp = getHRP()
@@ -611,7 +547,6 @@ local function tryGrab(egg)
 
     if Instance.cleaned then return end
 
-    -- Build args — First Area eggs need FirstAreaSlotKey
     local args = { Uid = egg.Uid }
     if type(egg.Uid) == "string" and string.find(egg.Uid, "^FirstAreaEgg_") then
         args.FirstAreaSlotKey = (egg.AreaId or "") .. ":" .. (egg.NestId or "")
@@ -684,7 +619,6 @@ function fetchSnapshot()
             end
         end
         log(("Snapshot: %d eggs on field"):format(count))
-
         if State.enabled then
             for _, egg in ipairs(snapshot.Records) do
                 if Instance.cleaned then return end
@@ -700,8 +634,8 @@ end
 -- INIT
 ------------------------------------------------------------
 track(task.spawn(function()
-    log(string.format("Loaded catalog: %d common eggs", #CATALOG))
     rebuildDropdown()
+    log(("Loaded %d target eggs (Common only)"):format(#EGG_POOL - 1))
 
     task.wait(2)
     if Instance.cleaned then return end
@@ -720,24 +654,18 @@ function Instance.cleanup()
     if Instance.cleaned then return end
     Instance.cleaned = true
     State.enabled = false
-
     for _, conn in ipairs(Instance.connections) do
         pcall(function() conn:Disconnect() end)
     end
     Instance.connections = {}
-
     if Instance.gui then
         pcall(function() Instance.gui:Destroy() end)
     end
-
     print("[AutoGrab] Cleanup complete.")
 end
 
 GENV.__AutoGrabInstance = Instance
 
 log("========================================")
-log("  AUTO GRAB v4 — TEST MODE (Common eggs)")
-log("========================================")
-log("  Catalog: Chicken, Dog, Duckling, Frog, Jerboa")
-log("  Default target: ANY common egg")
+log("  AUTO GRAB — COMMON TEST BUILD READY")
 log("========================================")
