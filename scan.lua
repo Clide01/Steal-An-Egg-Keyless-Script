@@ -1,14 +1,6 @@
 --[[
-    Steal an Egg — Auto Grab Field Eggs (UI Edition)
-    For Delta Executor
-
-    Flow:
-      1. Open UI (auto-loads on run)
-      2. Pick target egg from dropdown
-      3. Stand in your safe zone
-      4. Click "Set Safe Zone" (or it auto-saves on START)
-      5. Click START
-      6. Walk around freely — the script grabs and returns you to the safe zone
+    Steal an Egg — Auto Grab Field Eggs (UI Edition v2)
+    Fix: dropdown now loads ALL egg names from AssetDir, not just field state
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -21,12 +13,11 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
 -- ===== CONFIG =====
-local GRAB_COOLDOWN        = 2.0    -- seconds between grab attempts
-local TELEPORT_DELAY       = 0.35   -- delay before firing carry (after teleport)
-local RETURN_DELAY         = 0.55   -- delay after grab before teleporting back
-local SAFE_RETURN_OFFSET   = Vector3.new(0, 3, 0)
+local GRAB_COOLDOWN        = 2.0
+local TELEPORT_DELAY       = 0.35
+local RETURN_DELAY         = 0.55
 local EGG_ARRIVE_OFFSET    = Vector3.new(0, 3, 0)
-local RESCAN_INTERVAL      = 30     -- full snapshot every N seconds
+local RESCAN_INTERVAL      = 30
 -- ==================
 
 ------------------------------------------------------------
@@ -39,22 +30,32 @@ if not ok or not Remotes or not Remotes.EggWorld then
 end
 local E = Remotes.EggWorld
 
+-- Asset directory — full list of every pet / egg type
+local AssetDir = {}
+do
+    local okAD, data = pcall(require, ReplicatedStorage.Data.Assets)
+    if okAD and data and data.Directory then
+        AssetDir = data.Directory
+    else
+        warn("[AutoGrab] Could not load Assets.Directory")
+    end
+end
+
 local log = function(...) print("[AutoGrab]", ...) end
 
 ------------------------------------------------------------
 -- State
 ------------------------------------------------------------
 local State = {
-    enabled        = false,
-    selectedEgg    = nil,        -- AssetCategory string
-    safeZone       = nil,        -- CFrame
-    eggList        = {},         -- uid -> egg data
-    knownEggNames  = {},         -- set of "Raccoon", "Dog", etc.
-    isCarrying     = false,
-    lastGrab       = 0,
-    stats          = { grabbed = 0, failed = 0, returned = 0 },
-    lastGrabbed    = "—",
-    status         = "Idle",
+    enabled       = false,
+    selectedEgg   = nil,
+    safeZone      = nil,
+    eggList       = {},
+    isCarrying    = false,
+    lastGrab      = 0,
+    stats         = { grabbed = 0, failed = 0, returned = 0 },
+    lastGrabbed   = "—",
+    status        = "Idle",
 }
 
 local function getHRP()
@@ -63,13 +64,12 @@ local function getHRP()
 end
 
 ------------------------------------------------------------
--- BUILD UI
+-- UI COLORS
 ------------------------------------------------------------
 local COLORS = {
     bg       = Color3.fromRGB(15, 15, 22),
     bgAlt    = Color3.fromRGB(22, 22, 32),
     accent   = Color3.fromRGB(120, 255, 160),
-    accentHi = Color3.fromRGB(160, 255, 190),
     warn     = Color3.fromRGB(255, 180, 100),
     err      = Color3.fromRGB(255, 120, 120),
     text     = Color3.fromRGB(220, 220, 235),
@@ -77,6 +77,9 @@ local COLORS = {
     border   = Color3.fromRGB(60, 80, 70),
 }
 
+------------------------------------------------------------
+-- ROOT GUI
+------------------------------------------------------------
 local gui = Instance.new("ScreenGui")
 gui.Name = "AutoGrabUI"
 gui.ResetOnSpawn = false
@@ -84,12 +87,11 @@ gui.IgnoreGuiInset = true
 gui.DisplayOrder = 99999
 gui.Parent = PlayerGui
 
--- Main panel
 local panel = Instance.new("Frame")
 panel.Name = "Panel"
 panel.AnchorPoint = Vector2.new(1, 0)
 panel.Position = UDim2.new(1, -20, 0, 20)
-panel.Size = UDim2.fromOffset(300, 420)
+panel.Size = UDim2.fromOffset(300, 440)
 panel.BackgroundColor3 = COLORS.bg
 panel.BorderSizePixel = 0
 panel.Active = true
@@ -108,7 +110,6 @@ panelStroke.Parent = panel
 
 -- Header
 local header = Instance.new("Frame")
-header.Name = "Header"
 header.Size = UDim2.new(1, 0, 0, 36)
 header.BackgroundColor3 = COLORS.bgAlt
 header.BorderSizePixel = 0
@@ -117,13 +118,6 @@ header.Parent = panel
 local headerCorner = Instance.new("UICorner")
 headerCorner.CornerRadius = UDim.new(0, 14)
 headerCorner.Parent = header
-
-local headerClip = Instance.new("Frame")
-headerClip.Size = UDim2.new(1, 0, 0, 18)
-headerClip.Position = UDim2.new(0, 0, 1, -18)
-headerClip.BackgroundColor3 = COLORS.bgAlt
-headerClip.BorderSizePixel = 0
-headerClip.Parent = header
 
 local headerTitle = Instance.new("TextLabel")
 headerTitle.BackgroundTransparency = 1
@@ -153,25 +147,22 @@ local minCorner = Instance.new("UICorner")
 minCorner.CornerRadius = UDim.new(0, 6)
 minCorner.Parent = minimizeBtn
 
--- Content container
 local content = Instance.new("Frame")
-content.Name = "Content"
 content.Position = UDim2.fromOffset(0, 36)
 content.Size = UDim2.new(1, 0, 1, -36)
 content.BackgroundTransparency = 1
 content.Parent = panel
 
--- Minimize toggle
 local minimized = false
 minimizeBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     content.Visible = not minimized
-    panel.Size = minimized and UDim2.fromOffset(300, 36) or UDim2.fromOffset(300, 420)
+    panel.Size = minimized and UDim2.fromOffset(300, 36) or UDim2.fromOffset(300, 440)
     minimizeBtn.Text = minimized and "+" or "−"
 end)
 
 ------------------------------------------------------------
--- Dropdown label
+-- TARGET LABEL
 ------------------------------------------------------------
 local targetLbl = Instance.new("TextLabel")
 targetLbl.BackgroundTransparency = 1
@@ -185,10 +176,9 @@ targetLbl.Text = "TARGET EGG"
 targetLbl.Parent = content
 
 ------------------------------------------------------------
--- Dropdown trigger
+-- DROPDOWN BUTTON
 ------------------------------------------------------------
 local dropdownBtn = Instance.new("TextButton")
-dropdownBtn.Name = "DropdownBtn"
 dropdownBtn.Position = UDim2.fromOffset(14, 26)
 dropdownBtn.Size = UDim2.new(1, -28, 0, 32)
 dropdownBtn.BackgroundColor3 = COLORS.bgAlt
@@ -197,7 +187,7 @@ dropdownBtn.Font = Enum.Font.Gotham
 dropdownBtn.TextSize = 13
 dropdownBtn.TextColor3 = COLORS.text
 dropdownBtn.TextXAlignment = Enum.TextXAlignment.Left
-dropdownBtn.Text = "  Select an egg..."
+dropdownBtn.Text = "  Loading..."
 dropdownBtn.Parent = content
 
 local ddCorner = Instance.new("UICorner")
@@ -221,12 +211,34 @@ ddArrow.Text = "▼"
 ddArrow.Parent = dropdownBtn
 
 ------------------------------------------------------------
--- Dropdown list
+-- SEARCH BOX (helps when there are 100+ eggs)
+------------------------------------------------------------
+local searchBox = Instance.new("TextBox")
+searchBox.Position = UDim2.fromOffset(14, 62)
+searchBox.Size = UDim2.new(1, -28, 0, 26)
+searchBox.BackgroundColor3 = COLORS.bgAlt
+searchBox.BorderSizePixel = 0
+searchBox.Font = Enum.Font.Gotham
+searchBox.TextSize = 12
+searchBox.TextColor3 = COLORS.text
+searchBox.PlaceholderText = "  Search..."
+searchBox.PlaceholderColor3 = COLORS.textDim
+searchBox.Text = ""
+searchBox.ClearTextOnFocus = false
+searchBox.Visible = false
+searchBox.ZIndex = 6
+searchBox.Parent = content
+
+local sbCorner = Instance.new("UICorner")
+sbCorner.CornerRadius = UDim.new(0, 8)
+sbCorner.Parent = searchBox
+
+------------------------------------------------------------
+-- DROPDOWN LIST
 ------------------------------------------------------------
 local dropdownList = Instance.new("ScrollingFrame")
-dropdownList.Name = "DropdownList"
-dropdownList.Position = UDim2.fromOffset(14, 60)
-dropdownList.Size = UDim2.new(1, -28, 0, 160)
+dropdownList.Position = UDim2.fromOffset(14, 62)
+dropdownList.Size = UDim2.new(1, -28, 0, 170)
 dropdownList.BackgroundColor3 = COLORS.bgAlt
 dropdownList.BorderSizePixel = 0
 dropdownList.ScrollBarThickness = 6
@@ -259,27 +271,61 @@ dlPadding.PaddingLeft = UDim.new(0, 4)
 dlPadding.PaddingRight = UDim.new(0, 4)
 dlPadding.Parent = dropdownList
 
--- Populate list — start with "Any"
+------------------------------------------------------------
+-- BUILD NAME LIST from AssetDir + field eggs
+------------------------------------------------------------
+local allNames = {}     -- set of every egg type name
+
+local function collectAllEggNames()
+    -- 1. From AssetDir
+    for category, entry in pairs(AssetDir) do
+        if type(entry) == "table" then
+            local display = entry.DisplayName
+            if type(display) == "string" and display ~= "" then
+                allNames[display] = true
+            end
+            allNames[category] = true
+        end
+    end
+
+    -- 2. From live field eggs
+    for _, egg in pairs(State.eggList) do
+        if egg.AssetCategory and type(egg.AssetCategory) == "string" then
+            allNames[egg.AssetCategory] = true
+        end
+    end
+end
+
+local currentFilter = ""
+
 local function rebuildDropdown()
-    -- Clear existing items
+    -- Remove old items
     for _, c in ipairs(dropdownList:GetChildren()) do
         if c:IsA("TextButton") then c:Destroy() end
     end
 
-    -- Collect all names
-    local names = { "Any" }
-    for name, _ in pairs(State.knownEggNames) do
-        table.insert(names, name)
+    -- Sorted list
+    local sorted = { "Any" }
+    for name, _ in pairs(allNames) do
+        table.insert(sorted, name)
     end
-    table.sort(names, function(a, b)
+    table.sort(sorted, function(a, b)
         if a == "Any" then return true end
         if b == "Any" then return false end
-        return a < b
+        return string.lower(a) < string.lower(b)
     end)
 
-    for i, name in ipairs(names) do
+    -- Apply search filter
+    local filtered = {}
+    local lf = string.lower(currentFilter)
+    for _, name in ipairs(sorted) do
+        if lf == "" or string.find(string.lower(name), lf, 1, true) then
+            table.insert(filtered, name)
+        end
+    end
+
+    for i, name in ipairs(filtered) do
         local item = Instance.new("TextButton")
-        item.Name = "Item"
         item.Size = UDim2.new(1, 0, 0, 26)
         item.BackgroundColor3 = COLORS.bg
         item.BackgroundTransparency = 1
@@ -302,26 +348,46 @@ local function rebuildDropdown()
             State.selectedEgg = (name == "Any") and nil or name
             dropdownBtn.Text = "  " .. name
             dropdownList.Visible = false
+            searchBox.Visible = false
             ddArrow.Text = "▼"
             log("Selected target: " .. name)
         end)
     end
+
+    if #filtered == 0 then
+        local empty = Instance.new("TextLabel")
+        empty.Size = UDim2.new(1, 0, 0, 30)
+        empty.BackgroundTransparency = 1
+        empty.Font = Enum.Font.Gotham
+        empty.TextSize = 12
+        empty.TextColor3 = COLORS.textDim
+        empty.Text = "  No matching eggs"
+        empty.Parent = dropdownList
+    end
 end
 
-rebuildDropdown()
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    currentFilter = searchBox.Text or ""
+    rebuildDropdown()
+end)
 
--- Dropdown toggle
 dropdownBtn.MouseButton1Click:Connect(function()
-    dropdownList.Visible = not dropdownList.Visible
-    ddArrow.Text = dropdownList.Visible and "▲" or "▼"
+    local open = not dropdownList.Visible
+    dropdownList.Visible = open
+    searchBox.Visible = open
+    ddArrow.Text = open and "▲" or "▼"
+    if open then
+        currentFilter = ""
+        searchBox.Text = ""
+        rebuildDropdown()
+    end
 end)
 
 ------------------------------------------------------------
--- Safe zone section
+-- SAFE ZONE
 ------------------------------------------------------------
 local safeBtn = Instance.new("TextButton")
-safeBtn.Name = "SetSafeZone"
-safeBtn.Position = UDim2.fromOffset(14, 230)
+safeBtn.Position = UDim2.fromOffset(14, 240)
 safeBtn.Size = UDim2.new(1, -28, 0, 30)
 safeBtn.BackgroundColor3 = COLORS.bgAlt
 safeBtn.BorderSizePixel = 0
@@ -341,20 +407,9 @@ safeStroke.Thickness = 1
 safeStroke.Transparency = 0.5
 safeStroke.Parent = safeBtn
 
-safeBtn.MouseButton1Click:Connect(function()
-    local hrp = getHRP()
-    if hrp then
-        State.safeZone = hrp.CFrame
-        log("Safe zone set")
-        safeStatusLbl.Text = "Safe Zone: SET"
-        safeStatusLbl.TextColor3 = COLORS.accent
-    end
-end)
-
 local safeStatusLbl = Instance.new("TextLabel")
-safeStatusLbl.Name = "SafeStatus"
 safeStatusLbl.BackgroundTransparency = 1
-safeStatusLbl.Position = UDim2.fromOffset(14, 264)
+safeStatusLbl.Position = UDim2.fromOffset(14, 274)
 safeStatusLbl.Size = UDim2.new(1, -28, 0, 16)
 safeStatusLbl.Font = Enum.Font.Code
 safeStatusLbl.TextSize = 11
@@ -363,12 +418,21 @@ safeStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
 safeStatusLbl.Text = "Safe Zone: NOT SET"
 safeStatusLbl.Parent = content
 
+safeBtn.MouseButton1Click:Connect(function()
+    local hrp = getHRP()
+    if hrp then
+        State.safeZone = hrp.CFrame
+        safeStatusLbl.Text = "Safe Zone: SET"
+        safeStatusLbl.TextColor3 = COLORS.accent
+        log("Safe zone set")
+    end
+end)
+
 ------------------------------------------------------------
--- Start / Stop toggle
+-- TOGGLE
 ------------------------------------------------------------
 local toggleBtn = Instance.new("TextButton")
-toggleBtn.Name = "Toggle"
-toggleBtn.Position = UDim2.fromOffset(14, 288)
+toggleBtn.Position = UDim2.fromOffset(14, 298)
 toggleBtn.Size = UDim2.new(1, -28, 0, 38)
 toggleBtn.BackgroundColor3 = COLORS.accent
 toggleBtn.BorderSizePixel = 0
@@ -384,22 +448,18 @@ toggleCorner.Parent = toggleBtn
 
 toggleBtn.MouseButton1Click:Connect(function()
     if not State.enabled then
-        -- Enable: auto-save safe zone if not set
         if not State.safeZone then
             local hrp = getHRP()
             if hrp then
                 State.safeZone = hrp.CFrame
                 safeStatusLbl.Text = "Safe Zone: AUTO-SET"
                 safeStatusLbl.TextColor3 = COLORS.warn
-                log("Safe zone auto-set from current position")
+                log("Safe zone auto-set")
             end
         end
         State.enabled = true
         log("STARTED")
-        -- Immediate snapshot + grab attempt
-        task.spawn(function()
-            fetchSnapshot()
-        end)
+        task.spawn(fetchSnapshot)
     else
         State.enabled = false
         log("STOPPED")
@@ -407,12 +467,11 @@ toggleBtn.MouseButton1Click:Connect(function()
 end)
 
 ------------------------------------------------------------
--- Status / stats display
+-- STATUS LABELS
 ------------------------------------------------------------
 local statusLbl = Instance.new("TextLabel")
-statusLbl.Name = "Status"
 statusLbl.BackgroundTransparency = 1
-statusLbl.Position = UDim2.fromOffset(14, 334)
+statusLbl.Position = UDim2.fromOffset(14, 344)
 statusLbl.Size = UDim2.new(1, -28, 0, 14)
 statusLbl.Font = Enum.Font.Gotham
 statusLbl.TextSize = 11
@@ -421,11 +480,9 @@ statusLbl.TextXAlignment = Enum.TextXAlignment.Left
 statusLbl.Text = "Status: Idle"
 statusLbl.Parent = content
 
-local lastLbl = Enum  -- dummy to avoid warning
-lastLbl = Instance.new("TextLabel")
-lastLbl.Name = "Last"
+local lastLbl = Instance.new("TextLabel")
 lastLbl.BackgroundTransparency = 1
-lastLbl.Position = UDim2.fromOffset(14, 350)
+lastLbl.Position = UDim2.fromOffset(14, 360)
 lastLbl.Size = UDim2.new(1, -28, 0, 14)
 lastLbl.Font = Enum.Font.Gotham
 lastLbl.TextSize = 11
@@ -435,9 +492,8 @@ lastLbl.Text = "Last: —"
 lastLbl.Parent = content
 
 local statsLbl = Instance.new("TextLabel")
-statsLbl.Name = "Stats"
 statsLbl.BackgroundTransparency = 1
-statsLbl.Position = UDim2.fromOffset(14, 366)
+statsLbl.Position = UDim2.fromOffset(14, 376)
 statsLbl.Size = UDim2.new(1, -28, 0, 14)
 statsLbl.Font = Enum.Font.Code
 statsLbl.TextSize = 10
@@ -447,22 +503,31 @@ statsLbl.Text = "Grabbed: 0 · Failed: 0 · Returns: 0"
 statsLbl.Parent = content
 
 local fieldLbl = Instance.new("TextLabel")
-fieldLbl.Name = "Field"
 fieldLbl.BackgroundTransparency = 1
-fieldLbl.Position = UDim2.fromOffset(14, 382)
+fieldLbl.Position = UDim2.fromOffset(14, 392)
 fieldLbl.Size = UDim2.new(1, -28, 0, 14)
 fieldLbl.Font = Enum.Font.Code
 fieldLbl.TextSize = 10
 fieldLbl.TextColor3 = COLORS.textDim
 fieldLbl.TextXAlignment = Enum.TextXAlignment.Left
-fieldLbl.Text = "Field eggs tracked: 0"
+fieldLbl.Text = "Field eggs: 0"
 fieldLbl.Parent = content
 
+local assetLbl = Instance.new("TextLabel")
+assetLbl.BackgroundTransparency = 1
+assetLbl.Position = UDim2.fromOffset(14, 408)
+assetLbl.Size = UDim2.new(1, -28, 0, 14)
+assetLbl.Font = Enum.Font.Code
+assetLbl.TextSize = 10
+assetLbl.TextColor3 = COLORS.textDim
+assetLbl.TextXAlignment = Enum.TextXAlignment.Left
+assetLbl.Text = "Asset types loaded: 0"
+assetLbl.Parent = content
+
 ------------------------------------------------------------
--- UI refresh loop
+-- REFRESH UI
 ------------------------------------------------------------
 local function refreshUI()
-    -- Toggle button
     if State.enabled then
         toggleBtn.Text = "■  STOP"
         toggleBtn.BackgroundColor3 = COLORS.warn
@@ -471,24 +536,22 @@ local function refreshUI()
         toggleBtn.BackgroundColor3 = COLORS.accent
     end
 
-    -- Status
-    local statusText = State.enabled and (State.status or "Running") or "Idle"
-    statusLbl.Text = "Status: " .. statusText
+    statusLbl.Text = "Status: " .. (State.enabled and State.status or "Idle")
     statusLbl.TextColor3 = State.enabled and COLORS.accent or COLORS.textDim
-
-    -- Last grabbed
     lastLbl.Text = "Last: " .. State.lastGrabbed
 
-    -- Stats
     statsLbl.Text = string.format(
         "Grabbed: %d · Failed: %d · Returns: %d",
         State.stats.grabbed, State.stats.failed, State.stats.returned
     )
 
-    -- Field egg count
     local n = 0
     for _ in pairs(State.eggList) do n = n + 1 end
-    fieldLbl.Text = "Field eggs tracked: " .. n
+    fieldLbl.Text = "Field eggs: " .. n
+
+    local m = 0
+    for _ in pairs(allNames) do m = m + 1 end
+    assetLbl.Text = "Asset types loaded: " .. m
 end
 
 task.spawn(function()
@@ -499,26 +562,18 @@ task.spawn(function()
 end)
 
 ------------------------------------------------------------
--- Filter
+-- FILTER
 ------------------------------------------------------------
 local function matchesFilter(egg)
     if not egg or type(egg) ~= "table" then return false end
     if egg.State ~= "Slot" then return false end
     if not egg.Uid then return false end
-
-    -- Track egg name for dropdown
-    if egg.AssetCategory and type(egg.AssetCategory) == "string" then
-        State.knownEggNames[egg.AssetCategory] = true
-    end
-
-    -- No target = grab anything
     if not State.selectedEgg then return true end
-
     return egg.AssetCategory == State.selectedEgg
 end
 
 ------------------------------------------------------------
--- Grab logic
+-- GRAB LOGIC
 ------------------------------------------------------------
 local function teleportBack()
     if not State.safeZone then return end
@@ -542,27 +597,19 @@ local function tryGrab(egg)
     local position = cframe.Position or cframe
 
     State.status = "Grabbing " .. (egg.AssetCategory or "?")
+    log(("Grab: %s @ %s"):format(egg.AssetCategory or "?", egg.AreaId or "?"))
 
-    log(("Attempting: %s @ %s (uid=%s)"):format(
-        egg.AssetCategory or "?",
-        egg.AreaId or "?",
-        tostring(egg.Uid)
-    ))
-
-    -- Teleport to egg
     local hrp = getHRP()
     if hrp then
         hrp.CFrame = CFrame.new(position + EGG_ARRIVE_OFFSET)
         task.wait(TELEPORT_DELAY)
     end
 
-    -- Build args
     local args = { Uid = egg.Uid }
     if type(egg.Uid) == "string" and string.find(egg.Uid, "^FirstAreaEgg_") then
         args.FirstAreaSlotKey = (egg.AreaId or "") .. ":" .. (egg.NestId or "")
     end
 
-    -- Fire carry
     local success, err = pcall(function()
         E.AskFieldEggCarry:InvokeServer(args)
     end)
@@ -570,34 +617,24 @@ local function tryGrab(egg)
     if success then
         State.stats.grabbed = State.stats.grabbed + 1
         State.lastGrabbed = (egg.AssetCategory or "?") .. " @ " .. (egg.AreaId or "?")
-        log("Grab fired")
     else
         State.stats.failed = State.stats.failed + 1
         log("Grab failed: " .. tostring(err))
     end
 
-    -- Wait then teleport back
     task.wait(RETURN_DELAY)
     teleportBack()
-    State.status = "Returned · waiting"
-    task.wait(0.3)
     State.status = "Running"
-
-    refreshUI()
 end
 
 ------------------------------------------------------------
--- Event listeners
+-- EVENTS
 ------------------------------------------------------------
 E.FieldEggShifted.OnClientEvent:Connect(function(egg)
     if type(egg) ~= "table" or not egg.Uid then return end
     State.eggList[egg.Uid] = egg
-    if egg.AssetCategory then
-        State.knownEggNames[egg.AssetCategory] = true
-    end
-    if egg.State == "Slot" then
-        tryGrab(egg)
-    end
+    if egg.AssetCategory then allNames[egg.AssetCategory] = true end
+    if egg.State == "Slot" then tryGrab(egg) end
 end)
 
 E.FieldEggBatchShifted.OnClientEvent:Connect(function(batch)
@@ -605,45 +642,25 @@ E.FieldEggBatchShifted.OnClientEvent:Connect(function(batch)
     for _, egg in ipairs(batch) do
         if type(egg) == "table" and egg.Uid then
             State.eggList[egg.Uid] = egg
-            if egg.AssetCategory then
-                State.knownEggNames[egg.AssetCategory] = true
-            end
-            if egg.State == "Slot" then
-                tryGrab(egg)
-            end
+            if egg.AssetCategory then allNames[egg.AssetCategory] = true end
+            if egg.State == "Slot" then tryGrab(egg) end
         end
     end
 end)
 
 E.FieldEggGone.OnClientEvent:Connect(function(uid)
-    if type(uid) == "string" then
-        State.eggList[uid] = nil
-    end
+    if type(uid) == "string" then State.eggList[uid] = nil end
 end)
 
 E.FieldEggCarry.OnClientEvent:Connect(function(info)
     if type(info) == "table" then
         State.isCarrying = info.IsCarrying == true
-        if State.isCarrying then
-            log("Carrying egg")
-            State.status = "Carrying"
-        else
-            State.status = "Running"
-        end
-    end
-end)
-
-E.FieldEggRedeemVerdict.OnClientEvent:Connect(function(info)
-    if type(info) == "table" then
-        log(("Redeemed: %s (%s)"):format(
-            info.DisplayName or info.AssetCategory or "?",
-            info.Rarity or "?"
-        ))
+        State.status = State.isCarrying and "Carrying" or "Running"
     end
 end)
 
 ------------------------------------------------------------
--- Snapshot
+-- SNAPSHOT
 ------------------------------------------------------------
 function fetchSnapshot()
     local okSnap, snapshot = pcall(function()
@@ -654,44 +671,44 @@ function fetchSnapshot()
         for _, egg in ipairs(snapshot.Records) do
             if egg.Uid then
                 State.eggList[egg.Uid] = egg
-                if egg.AssetCategory then
-                    State.knownEggNames[egg.AssetCategory] = true
-                end
+                if egg.AssetCategory then allNames[egg.AssetCategory] = true end
                 count = count + 1
             end
         end
         log(("Snapshot: %d eggs on field"):format(count))
-        rebuildDropdown()
-
+        if dropdownList.Visible then rebuildDropdown() end
         if State.enabled then
-            for _, egg in ipairs(snapshot.Records) do
-                tryGrab(egg)
-            end
+            for _, egg in ipairs(snapshot.Records) do tryGrab(egg) end
         end
     else
         warn("[AutoGrab] Snapshot failed")
     end
 end
 
+------------------------------------------------------------
+-- INIT
+------------------------------------------------------------
 task.spawn(function()
+    -- Load asset names immediately
+    collectAllEggNames()
+    log(("Loaded %d asset names"):format((function()
+        local n = 0
+        for _ in pairs(allNames) do n = n + 1 end
+        return n
+    end)()))
+
+    dropdownBtn.Text = "  Any (default)"
+    rebuildDropdown()
+
     task.wait(2)
     fetchSnapshot()
+
     while gui.Parent do
         task.wait(RESCAN_INTERVAL)
-        if State.enabled then
-            fetchSnapshot()
-        end
+        if State.enabled then fetchSnapshot() end
     end
 end)
 
-------------------------------------------------------------
--- Startup log
-------------------------------------------------------------
 log("========================================")
-log("  AUTO GRAB — UI EDITION")
-log("========================================")
-log("  1. Pick target egg from dropdown")
-log("  2. Stand in your safe zone")
-log("  3. Click 'Set Safe Zone' (or auto-saves on START)")
-log("  4. Click START")
+log("  AUTO GRAB — UI v2 READY")
 log("========================================")
