@@ -1,4 +1,4 @@
--- AutoSteal.lua v2.3 — anchored flight (real speed, no rubber-band)
+-- AutoSteal.lua v2.4 — MoveTo-based movement (no fly, no anchor)
 
 local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
@@ -6,7 +6,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local AutoSteal = {}
 AutoSteal.__index = AutoSteal
-AutoSteal.VERSION = "2.3.0"
+AutoSteal.VERSION = "2.4.0"
 
 local PROMPT_PART  = "SmartPromptPart"
 local PROMPT_CHILD = "CarryAreaEgg"
@@ -16,11 +16,10 @@ function AutoSteal.new(detector, opts)
     self.detector   = detector
     self.opts       = opts or {}
 
-    self.flySpeed       = self.opts.FlySpeed or 600         -- studs/sec
-    self.returnSpeed    = self.opts.ReturnSpeed or 900      -- studs/sec
-    self.stepMax        = self.opts.StepMax or 40           -- hard cap: studs/frame
-    self.flyTimeout     = self.opts.FlyTimeout or 8
-    self.arriveDist     = self.opts.ArriveDistance or 4
+    -- WalkSpeed = how fast to move. Server already allows 112.
+    self.walkSpeed      = self.opts.WalkSpeed or 250
+    self.moveTimeout    = self.opts.MoveTimeout or 6
+    self.arriveDist     = self.opts.ArriveDistance or 3
 
     self.cooldown       = self.opts.Cooldown or 1.5
     self.globalCooldown = self.opts.GlobalCooldown or 0.3
@@ -56,13 +55,29 @@ local function getPrompt()
     return part, prompt
 end
 
+-- Unanchor & clear any leftover state from previous failed attempts
+local function resetCharacter()
+    local hrp = getHRP()
+    local hum = getHum()
+    if hrp then
+        pcall(function() hrp.Anchored = false end)
+        pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+    end
+    if hum then
+        hum.PlatformStand = false
+    end
+end
+
 function AutoSteal:setEnabled(v)
     self.enabled = v and true or false
-    if self.enabled and not self.safePosition then
-        local hrp = getHRP()
-        if hrp then
-            self.safePosition = hrp.CFrame
-            self.log("Safe position captured:", tostring(hrp.Position))
+    if self.enabled then
+        resetCharacter()
+        if not self.safePosition then
+            local hrp = getHRP()
+            if hrp then
+                self.safePosition = hrp.CFrame
+                self.log("Safe position captured:", tostring(hrp.Position))
+            end
         end
     end
     self.stats.lastStatus = self.enabled and "running" or "idle"
@@ -74,7 +89,7 @@ function AutoSteal:captureSafePosition()
     local hrp = getHRP()
     if hrp then
         self.safePosition = hrp.CFrame
-        self.log("Safe position captured at", tostring(hrp.Position))
+        self.log("Safe position saved at", tostring(hrp.Position))
         return true
     end
     return false
@@ -91,48 +106,32 @@ function AutoSteal:clearTarget()
 end
 function AutoSteal:getTarget() return self.target end
 function AutoSteal:_targetIsValid()
-    if not self.target then return false end
-    if not self.target.instance or not self.target.instance.Parent then return false end
+    if not self.target or not self.target.instance or not self.target.instance.Parent then
+        return false
+    end
     return true
 end
 
 -- =========================================================
--- Anchored flight — the humanoid can't fight an anchored part,
--- so CFrame moves land exactly. No rubber-band possible.
+-- MoveTo-based walking. Uses the game's own locomotion,
+-- so the server has zero reason to flag or reject it.
 -- =========================================================
-function AutoSteal:_flyTo(targetPos, speedOverride)
+function AutoSteal:_moveTo(targetPos)
     local hrp = getHRP()
     local hum = getHum()
-    if not hrp then return false, "no HRP" end
+    if not hrp or not hum then return false, "no HRP/hum" end
 
-    local speed = speedOverride or self.flySpeed
-    local deadline = tick() + self.flyTimeout
-    local frames = 0
-    local startTime = tick()
-    local startPos = hrp.Position
+    resetCharacter()
 
-    -- Save & freeze humanoid
-    local oldAnchored = hrp.Anchored
-    local oldWS, oldJP, oldPS
-    if hum then
-        oldWS = hum.WalkSpeed
-        oldJP = hum.JumpPower
-        oldPS = hum.PlatformStand
-        hum.WalkSpeed = 0
-        hum.JumpPower = 0
-        hum.PlatformStand = true
-    end
+    local oldWS = hum.WalkSpeed
+    hum.WalkSpeed = self.walkSpeed
 
-    -- Anchor the HRP — this is what makes CFrame movement stick
-    hrp.Anchored = true
-
-    -- Zero velocities
-    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-    pcall(function() hrp.AssemblyAngularVelocity = Vector3.zero end)
-
+    local deadline = tick() + self.moveTimeout
     local arrived = false
     local lastDist = math.huge
-    local stalledFrames = 0
+    local stallCount = 0
+    local startPos = hrp.Position
+    local startTime = tick()
 
     while tick() < deadline do
         local current = hrp.Position
@@ -144,42 +143,34 @@ function AutoSteal:_flyTo(targetPos, speedOverride)
             break
         end
 
-        -- Stall detection (only triggers if truly stuck)
-        if math.abs(dist - lastDist) < 0.1 then
-            stalledFrames = stalledFrames + 1
-            if stalledFrames > 30 then
-                self.log("Flight stalled — bailing")
+        -- Stall detection
+        if math.abs(dist - lastDist) < 0.2 then
+            stallCount = stallCount + 1
+            if stallCount > 25 then
+                self.log(string.format("Move stalled at dist=%.1f", dist))
                 break
             end
         else
-            stalledFrames = 0
+            stallCount = 0
         end
         lastDist = dist
 
-        -- Speed is in studs/sec; assume ~60fps for the per-frame step
-        local stepDist = math.min(speed / 60, self.stepMax, dist)
-        local newPos = current + delta.Unit * stepDist
+        -- Issue a new MoveTo — repeating it helps when the game cancels
+        pcall(function() hum:MoveTo(targetPos) end)
 
-        -- Face the direction of travel
-        local lookTarget = newPos + (targetPos - newPos).Unit
-        hrp.CFrame = CFrame.lookAt(newPos, lookTarget)
-
-        frames = frames + 1
-        RunService.Heartbeat:Wait()
+        task.wait(0.1)
     end
 
-    -- Restore
-    hrp.Anchored = oldAnchored
-    if hum then
-        hum.PlatformStand = oldPS or false
-        hum.WalkSpeed = oldWS or 16
-        hum.JumpPower = oldJP or 50
-    end
+    -- Stop movement
+    pcall(function() hum:MoveTo(hrp.Position) end)
+    hum.WalkSpeed = oldWS or 16
 
-    local elapsed = tick() - startTime
     local traveled = (hrp.Position - startPos).Magnitude
-    self.log(string.format("Flight: %.1f studs in %.2fs (%.0f studs/s, %d frames)",
-        traveled, elapsed, traveled / math.max(elapsed, 0.001), frames))
+    local elapsed = tick() - startTime
+    if traveled > 1 then
+        self.log(string.format("Moved %.1f studs in %.2fs (%.0f studs/s)",
+            traveled, elapsed, traveled / math.max(elapsed, 0.001)))
+    end
 
     return arrived
 end
@@ -218,6 +209,8 @@ function AutoSteal:_stealOne(rec)
     self.lastAttempt[rec.instance] = now
     self._lastGlobal = now
 
+    resetCharacter()
+
     local hrp = getHRP()
     if not hrp then return false, "no HRP" end
 
@@ -228,19 +221,19 @@ function AutoSteal:_stealOne(rec)
         self.safePosition = hrp.CFrame
     end
 
-    -- Aim at the prompt (which hovers over the target egg)
-    local targetPos = part.Position + Vector3.new(0, 3, 0)
+    -- Aim slightly above the prompt so we don't collide with its base
+    local targetPos = part.Position + Vector3.new(0, 0.5, 0)
 
-    local moved = self:_flyTo(targetPos, self.flySpeed)
+    local moved, moveErr = self:_moveTo(targetPos)
     if not moved then
-        self.log("Move failed — returning to safe")
+        self.log("Move failed:", moveErr or "timeout")
         if self.safePosition then
-            self:_flyTo(self.safePosition.Position, self.returnSpeed)
+            self:_moveTo(self.safePosition.Position)
         end
         return false, "move failed"
     end
 
-    task.wait(0.12)
+    task.wait(0.1)
 
     self.stats.attempts = self.stats.attempts + 1
     local ok, fireErr = self:_firePromptOnPart(part, prompt)
@@ -257,7 +250,7 @@ function AutoSteal:_stealOne(rec)
 
     if self.returnToOrigin and self.safePosition then
         task.wait(0.15)
-        self:_flyTo(self.safePosition.Position, self.returnSpeed)
+        self:_moveTo(self.safePosition.Position)
     end
 
     return ok, fireErr
@@ -305,7 +298,10 @@ function AutoSteal:startLoop(filters)
     end)
 end
 
-function AutoSteal:stopLoop() self._loopRunning = false end
+function AutoSteal:stopLoop()
+    self._loopRunning = false
+    resetCharacter()
+end
 
 function AutoSteal:testFire(rec)
     local part, prompt = getPrompt()
