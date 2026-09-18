@@ -22,7 +22,13 @@ local RemoteSpy = loadstring(game:HttpGet(REMOTE_SPY_URL, true))()
 local spy = RemoteSpy.new({ Filter = "steal", Verbose = false })
 
 local AutoSteal = loadstring(game:HttpGet(AUTO_STEAL_URL, true))()
-local auto = AutoSteal.new(detector, { TeleportFirst = true, Cooldown = 3 })
+local auto = AutoSteal.new(detector, {
+    UseFly          = true,   -- fly instead of teleport
+    FlySpeed        = 60,     -- studs/sec
+    Cooldown        = 3,      -- per-egg cooldown
+    GlobalCooldown  = 1,      -- between any two steals
+    ReturnToOrigin  = true,   -- fly back to safe position after steal
+})
 
 local Filters = { Rarity = "All", Area = "All" }
 _G.PlundererFilters = Filters
