@@ -6,7 +6,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
 -- ===== CONFIG =====
-local UI_URL         = "https://raw.githubusercontent.com/howiieee/Keyless-Steal-An-Egg-Script/refs/heads/main/LoaderUI.lua"
+local UI_URL         = "https://raw.githubusercontent.com/Clide01/PlundererHub/refs/heads/main/LoaderUI.lua"
 local COUNTER_URL    = "https://sell-counter-temp2.bluealpha1365.workers.dev/report"
 local SELL_WAIT      = 2.0    -- seconds to wait after FireServer before reporting
 local MEME_DELAY     = 4
