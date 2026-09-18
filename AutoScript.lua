@@ -108,7 +108,18 @@ local statFailures  = makeStat(0.67, "FAILED",    "FailedVal",
     Color3.fromRGB(255, 130, 130))
 
 local statusLabel = ui:addLabel(statsSection, "Status: idle")
-
+local safeLabel = ui:addLabel(statsSection, "Safe position: none")
+task.spawn(function()
+    while true do
+        if auto.safePosition then
+            local p = auto.safePosition.Position
+            safeLabel.Text = string.format("Safe position: (%.0f, %.0f, %.0f)", p.X, p.Y, p.Z)
+        else
+            safeLabel.Text = "Safe position: none"
+        end
+        task.wait(1)
+    end
+end)
 local manualSection = ui:addSection(stealTab, "Manual Control")
 ui:addButton(manualSection, "Test Fire Prompt on Closest Egg", function()
     local matches = detector:getMatching(Filters.Rarity, Filters.Area)
@@ -359,6 +370,25 @@ ui:addSlider(perf, "Walk Speed", 16, 200, 16, function(v)
     local char = LocalPlayer.Character
     if char and char:FindFirstChildOfClass("Humanoid") then
         char.Humanoid.WalkSpeed = v
+    end
+end)
+
+local movement = ui:addSection(misc, "Movement")
+ui:addToggle(movement, "Fly Mode (no teleport)", true, function(v)
+    auto.useFly = v
+    print("[AutoUI] Fly mode:", v)
+end)
+ui:addSlider(movement, "Fly Speed", 20, 200, 60, function(v)
+    auto.flySpeed = v
+end)
+ui:addToggle(movement, "Return to Origin After Steal", true, function(v)
+    auto.returnToOrigin = v
+end)
+ui:addButton(movement, "Set Safe Position Here", function()
+    if auto:captureSafePosition() then
+        print("[AutoUI] Safe position saved")
+    else
+        warn("[AutoUI] Couldn't capture — no character")
     end
 end)
 
