@@ -163,7 +163,7 @@ function AutoSteal:_firePromptOnPart(part, prompt)
     local okB, errB = pcall(function() prompt:InputHoldBegin() end)
     if not okB then return false, "InputHoldBegin: " .. tostring(errB) end
 
-    task.wait((prompt.HoldDuration or 1.2) + 0.05)
+    task.wait((prompt.HoldDuration or 1.2) + 0.10)
 
     local okE, errE = pcall(function() prompt:InputHoldEnd() end)
     if not okE then return false, "InputHoldEnd: " .. tostring(errE) end
