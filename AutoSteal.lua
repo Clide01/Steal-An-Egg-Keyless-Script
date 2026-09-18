@@ -1,21 +1,22 @@
--- AutoSteal.lua v1.0.0
--- Triggers the shared Workspace.SmartPromptPart.CarryAreaEgg prompt.
--- Teleports to the target egg, fires the prompt, returns to origin.
+-- AutoSteal.lua v1.1.0
+-- Directly targets Workspace.SmartPromptPart.CarryAreaEgg.
+-- Teleports to the PROMPT (not the egg), holds for the exact duration.
 
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
 local AutoSteal = {}
 AutoSteal.__index = AutoSteal
-AutoSteal.VERSION = "1.0.0"
+AutoSteal.VERSION = "1.1.0"
+
+local PROMPT_PATH = { "SmartPromptPart", "CarryAreaEgg" }
 
 function AutoSteal.new(detector, opts)
     local self = setmetatable({}, AutoSteal)
     self.detector    = detector
     self.opts        = opts or {}
-    self.teleportFirst = self.opts.TeleportFirst ~= false
     self.cooldown    = self.opts.Cooldown or 3
-    self.postFireWait = self.opts.PostFireWait or 0.35
+    self.postFireWait = self.opts.PostFireWait or 0.4
     self.enabled     = false
     self.lastAttempt = {}
     self.stats       = { attempts = 0, successes = 0, failures = 0, lastStatus = "idle" }
@@ -37,40 +38,38 @@ local function getHRP()
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 
-local function findSharedPrompts()
-    local out = {}
-    local seen = {}
-    for _, inst in ipairs(workspace:GetDescendants()) do
-        if inst:IsA("ProximityPrompt") then
-            local n = string.lower(inst.Name or "")
-            local a = string.lower(inst.ActionText or "")
-            local o = string.lower(inst.ObjectText or "")
-            if string.find(n, "carry", 1, true)
-               or string.find(n, "steal", 1, true)
-               or string.find(a, "steal", 1, true)
-               or string.find(o, "egg", 1, true) then
-                local parent = inst.Parent
-                if parent and not seen[parent] then
-                    seen[parent] = true
-                    table.insert(out, inst)
-                end
-            end
-        end
-    end
-    return out
+local function getPrompt()
+    local part = workspace:FindFirstChild(PROMPT_PATH[1])
+    if not part then return nil, nil end
+    local prompt = part:FindFirstChild(PROMPT_PATH[2])
+    if not prompt or not prompt:IsA("ProximityPrompt") then return part, nil end
+    return part, prompt
 end
 
-function AutoSteal:_firePrompt(prompt)
-    if not prompt or not prompt.Parent then return false, "no prompt" end
+function AutoSteal:_firePromptOnPart(part, prompt)
+    if not part or not prompt then return false, "missing prompt" end
     if not prompt.Enabled then return false, "prompt disabled" end
 
-    local okBegin, errBegin = pcall(function() prompt:InputHoldBegin() end)
-    if not okBegin then return false, "holdBegin: " .. tostring(errBegin) end
+    local hrp = getHRP()
+    if not hrp then return false, "no HRP" end
 
-    task.wait(math.max(0.1, prompt.HoldDuration or 0.4))
+    -- Verify we're within MaxActivationDistance of the prompt's part
+    local partPos = part.Position
+    local myPos   = hrp.Position
+    local dist    = (partPos - myPos).Magnitude
+    local maxDist = prompt.MaxActivationDistance or 10
 
-    local okEnd, errEnd = pcall(function() prompt:InputHoldEnd() end)
-    if not okEnd then return false, "holdEnd: " .. tostring(errEnd) end
+    self.log(string.format("Distance to prompt: %.2f / %.2f", dist, maxDist))
+
+    -- Fire the hold sequence
+    local okB, errB = pcall(function() prompt:InputHoldBegin() end)
+    if not okB then return false, "InputHoldBegin: " .. tostring(errB) end
+
+    -- Wait EXACTLY the hold duration + small buffer
+    task.wait((prompt.HoldDuration or 1.2) + 0.05)
+
+    local okE, errE = pcall(function() prompt:InputHoldEnd() end)
+    if not okE then return false, "InputHoldEnd: " .. tostring(errE) end
 
     return true
 end
@@ -83,54 +82,41 @@ function AutoSteal:_stealOne(rec)
     self.lastAttempt[rec.instance] = now
 
     local hrp = getHRP()
-    if not hrp then return false, "no hrp" end
-    if not rec.position then return false, "no position" end
+    if not hrp then return false, "no HRP" end
 
-    local savedCF, savedVel
-    if self.teleportFirst then
-        savedCF  = hrp.CFrame
-        savedVel = hrp.AssemblyLinearVelocity
-        hrp.CFrame = CFrame.new(rec.position + Vector3.new(0, 4, 0))
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        task.wait(0.35)
+    local part, prompt = getPrompt()
+    if not part or not prompt then
+        return false, "SmartPromptPart.CarryAreaEgg not found"
     end
 
-    local prompts = findSharedPrompts()
-    if #prompts == 0 then
-        if savedCF then hrp.CFrame = savedCF end
-        return false, "no prompt in workspace"
-    end
+    -- Save position
+    local savedCF, savedVel = hrp.CFrame, hrp.AssemblyLinearVelocity
 
-    -- Pick the prompt whose parent part is closest to us
-    local best, bestDist = nil, math.huge
-    for _, p in ipairs(prompts) do
-        local part = p.Parent
-        if part and part:IsA("BasePart") then
-            local d = (part.Position - hrp.Position).Magnitude
-            if d < bestDist then best, bestDist = p, d end
-        end
-    end
-    if not best then
-        if savedCF then hrp.CFrame = savedCF end
-        return false, "no valid prompt parent"
-    end
+    -- Teleport to the PROMPT's position (plus a small Y offset to sit on top)
+    local target = part.Position + Vector3.new(0, 4, 0)
+    hrp.CFrame = CFrame.new(target)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    task.wait(0.35)
 
+    -- Fire it
     self.stats.attempts = self.stats.attempts + 1
-    local ok, err = self:_firePrompt(best)
+    local ok, err = self:_firePromptOnPart(part, prompt)
 
+    -- Log result and wait for the game's own steal logic to finish
     if ok then
         self.stats.successes = self.stats.successes + 1
         self.stats.lastStatus = "success: " .. rec.name
+        self.log("Fired on", rec.name, "— OK")
     else
         self.stats.failures = self.stats.failures + 1
         self.stats.lastStatus = "failed: " .. err
+        self.log("Fired on", rec.name, "—", err)
     end
 
-    if self.teleportFirst and savedCF then
-        task.wait(self.postFireWait)
-        hrp.CFrame = savedCF
-        pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
-    end
+    -- Return to saved position
+    task.wait(self.postFireWait)
+    hrp.CFrame = savedCF
+    pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
 
     return ok, err
 end
@@ -144,7 +130,6 @@ function AutoSteal:startLoop(filters)
             if self.enabled then
                 local matches = self.detector:getMatching(filters.Rarity, filters.Area)
                 if #matches > 0 then
-                    -- Pick closest target
                     local hrp = getHRP()
                     local closest = matches[1]
                     if hrp then
@@ -172,6 +157,18 @@ end
 
 function AutoSteal:stopLoop()
     self._loopRunning = false
+end
+
+-- Manual test helper
+function AutoSteal:testFire(rec)
+    local part, prompt = getPrompt()
+    if not part or not prompt then return false, "prompt not found" end
+    if not rec then
+        local hrp = getHRP()
+        if not hrp then return false, "no HRP" end
+        rec = { instance = prompt, name = "(manual test)", position = part.Position }
+    end
+    return self:_stealOne(rec)
 end
 
 return AutoSteal
