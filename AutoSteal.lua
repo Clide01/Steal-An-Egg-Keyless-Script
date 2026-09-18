@@ -1,4 +1,4 @@
--- AutoSteal.lua v2.4 — MoveTo-based movement (no fly, no anchor)
+-- AutoSteal.lua v2.5 — CFrame stepping (bypasses WalkSpeed clamp)
 
 local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
@@ -6,7 +6,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local AutoSteal = {}
 AutoSteal.__index = AutoSteal
-AutoSteal.VERSION = "2.4.0"
+AutoSteal.VERSION = "2.5.0"
 
 local PROMPT_PART  = "SmartPromptPart"
 local PROMPT_CHILD = "CarryAreaEgg"
@@ -16,9 +16,8 @@ function AutoSteal.new(detector, opts)
     self.detector   = detector
     self.opts       = opts or {}
 
-    -- WalkSpeed = how fast to move. Server already allows 112.
-    self.walkSpeed      = self.opts.WalkSpeed or 250
-    self.moveTimeout    = self.opts.MoveTimeout or 6
+    self.stepPerFrame   = self.opts.StepPerFrame or 15      -- studs/frame (60fps → 900/s)
+    self.moveTimeout    = self.opts.MoveTimeout or 5
     self.arriveDist     = self.opts.ArriveDistance or 3
 
     self.cooldown       = self.opts.Cooldown or 1.5
@@ -55,13 +54,14 @@ local function getPrompt()
     return part, prompt
 end
 
--- Unanchor & clear any leftover state from previous failed attempts
+-- Fully reset character before each move
 local function resetCharacter()
     local hrp = getHRP()
     local hum = getHum()
     if hrp then
         pcall(function() hrp.Anchored = false end)
         pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+        pcall(function() hrp.AssemblyAngularVelocity = Vector3.zero end)
     end
     if hum then
         hum.PlatformStand = false
@@ -113,25 +113,33 @@ function AutoSteal:_targetIsValid()
 end
 
 -- =========================================================
--- MoveTo-based walking. Uses the game's own locomotion,
--- so the server has zero reason to flag or reject it.
+-- Fast CFrame stepping. Bypasses the game's WalkSpeed clamp
+-- by moving position directly with small, smooth per-frame steps.
 -- =========================================================
-function AutoSteal:_moveTo(targetPos)
+function AutoSteal:_fastMove(targetPos)
     local hrp = getHRP()
     local hum = getHum()
-    if not hrp or not hum then return false, "no HRP/hum" end
+    if not hrp then return false, "no HRP" end
 
     resetCharacter()
 
-    local oldWS = hum.WalkSpeed
-    hum.WalkSpeed = self.walkSpeed
+    -- Disable humanoid so it doesn't fight our moves
+    local oldWS, oldJP, oldPS
+    if hum then
+        oldWS = hum.WalkSpeed
+        oldJP = hum.JumpPower
+        oldPS = hum.PlatformStand
+        hum.WalkSpeed = 0
+        hum.JumpPower = 0
+        hum.PlatformStand = true
+    end
 
     local deadline = tick() + self.moveTimeout
+    local startPos = hrp.Position
+    local startTime = tick()
     local arrived = false
     local lastDist = math.huge
     local stallCount = 0
-    local startPos = hrp.Position
-    local startTime = tick()
 
     while tick() < deadline do
         local current = hrp.Position
@@ -143,11 +151,11 @@ function AutoSteal:_moveTo(targetPos)
             break
         end
 
-        -- Stall detection
-        if math.abs(dist - lastDist) < 0.2 then
+        -- Stall detector: if server is reverting us, position won't change
+        if math.abs(dist - lastDist) < 0.5 then
             stallCount = stallCount + 1
-            if stallCount > 25 then
-                self.log(string.format("Move stalled at dist=%.1f", dist))
+            if stallCount > 30 then
+                self.log(string.format("Stall at dist=%.1f (server may be blocking)", dist))
                 break
             end
         else
@@ -155,15 +163,28 @@ function AutoSteal:_moveTo(targetPos)
         end
         lastDist = dist
 
-        -- Issue a new MoveTo — repeating it helps when the game cancels
-        pcall(function() hum:MoveTo(targetPos) end)
+        -- Small step toward target
+        local stepDist = math.min(self.stepPerFrame, dist)
+        local newPos = current + delta.Unit * stepDist
 
-        task.wait(0.1)
+        pcall(function()
+            hrp.CFrame = CFrame.lookAt(newPos, newPos + delta.Unit)
+        end)
+
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end)
+
+        RunService.Heartbeat:Wait()
     end
 
-    -- Stop movement
-    pcall(function() hum:MoveTo(hrp.Position) end)
-    hum.WalkSpeed = oldWS or 16
+    -- Restore humanoid
+    if hum then
+        hum.PlatformStand = oldPS or false
+        hum.WalkSpeed = oldWS or 16
+        hum.JumpPower = oldJP or 50
+    end
 
     local traveled = (hrp.Position - startPos).Magnitude
     local elapsed = tick() - startTime
@@ -221,14 +242,12 @@ function AutoSteal:_stealOne(rec)
         self.safePosition = hrp.CFrame
     end
 
-    -- Aim slightly above the prompt so we don't collide with its base
-    local targetPos = part.Position + Vector3.new(0, 0.5, 0)
+    local targetPos = part.Position + Vector3.new(0, 3, 0)
 
-    local moved, moveErr = self:_moveTo(targetPos)
+    local moved = self:_fastMove(targetPos)
     if not moved then
-        self.log("Move failed:", moveErr or "timeout")
         if self.safePosition then
-            self:_moveTo(self.safePosition.Position)
+            self:_fastMove(self.safePosition.Position)
         end
         return false, "move failed"
     end
@@ -249,8 +268,8 @@ function AutoSteal:_stealOne(rec)
     end
 
     if self.returnToOrigin and self.safePosition then
-        task.wait(0.15)
-        self:_moveTo(self.safePosition.Position)
+        task.wait(0.1)
+        self:_fastMove(self.safePosition.Position)
     end
 
     return ok, fireErr
