@@ -19,7 +19,7 @@ end)
 -- ===========================
 
 -- ===== CONFIG =====
-local UI_URL                 = "https://raw.githubusercontent.com/howiieee/Keyless-Steal-An-Egg-Script/refs/heads/main/LoaderUI.lua"
+local UI_URL                 = "https://raw.githubusercontent.com/Clide01/PlundererHub/refs/heads/main/LoaderUI.lua"
 local COUNTER_URL            = "https://sae-counter.plundererhub.workers.dev/report"
 local SELL_WAIT              = 2.0
 local MEME_DELAY             = 4
