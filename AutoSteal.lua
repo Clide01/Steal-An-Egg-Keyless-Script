@@ -1,4 +1,4 @@
--- AutoSteal.lua v2.6 — LinearVelocity flight
+-- AutoSteal.lua v3.0 — WalkSpeed hook + MoveTo
 
 local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
@@ -6,23 +6,66 @@ local LocalPlayer = Players.LocalPlayer
 
 local AutoSteal = {}
 AutoSteal.__index = AutoSteal
-AutoSteal.VERSION = "2.6.0"
+AutoSteal.VERSION = "3.0.0"
 
 local PROMPT_PART  = "SmartPromptPart"
 local PROMPT_CHILD = "CarryAreaEgg"
 
+-- =========================================================
+-- WalkSpeed hook: force every set to at least FORCED_WS
+-- =========================================================
+local FORCED_WS = 500
+local hookActive = false
+local originalWalkSpeed = nil
+
+local function installWalkSpeedHook()
+    if hookActive then return end
+    if type(getrawmetatable) ~= "function" then
+        warn("[AutoSteal] getrawmetatable not available — can't hook WalkSpeed")
+        return
+    end
+
+    local mt = getrawmetatable(game)
+    local oldNewIndex = mt.__newindex
+    if not oldNewIndex then return end
+
+    pcall(function() setreadonly(mt, false) end)
+    mt.__newindex = newcclosure(function(t, k, v)
+        if k == "WalkSpeed" and typeof(t) == "Instance" and t:IsA("Humanoid") then
+            if typeof(v) == "number" and v < FORCED_WS then
+                v = FORCED_WS
+            end
+        end
+        return oldNewIndex(t, k, v)
+    end)
+    pcall(function() setreadonly(mt, true) end)
+
+    hookActive = true
+    print("[AutoSteal] WalkSpeed hook installed (min forced:", FORCED_WS .. ")")
+end
+
+local function uninstallWalkSpeedHook()
+    if not hookActive then return end
+    if type(getrawmetatable) ~= "function" then return end
+    local mt = getrawmetatable(game)
+    pcall(function() setreadonly(mt, false) end)
+    mt.__newindex = originalWalkSpeed
+    pcall(function() setreadonly(mt, true) end)
+    hookActive = false
+    print("[AutoSteal] WalkSpeed hook removed")
+end
+
+-- =========================================================
+-- Constructor
+-- =========================================================
 function AutoSteal.new(detector, opts)
     local self = setmetatable({}, AutoSteal)
     self.detector   = detector
     self.opts       = opts or {}
 
-    self.flySpeed       = self.opts.FlySpeed or 350    -- studs/sec
-    self.returnSpeed    = self.opts.ReturnSpeed or 500
-    self.flyTimeout     = self.opts.FlyTimeout or 6
-    self.arriveDist     = self.opts.ArriveDistance or 3
-    self.useFly         = self.opts.UseFly ~= false
-    self.cframeFallback = self.opts.CFrameFallback ~= false  -- if LV fails, use CFrame
-    self.cframeStep     = self.opts.CFrameStep or 18    -- studs/frame in fallback
+    self.walkSpeed     = self.opts.WalkSpeed or FORCED_WS
+    self.moveTimeout   = self.opts.MoveTimeout or 8
+    self.arriveDist    = self.opts.ArriveDistance or 4
 
     self.cooldown       = self.opts.Cooldown or 1.5
     self.globalCooldown = self.opts.GlobalCooldown or 0.3
@@ -65,11 +108,6 @@ local function resetCharacter()
         pcall(function() hrp.Anchored = false end)
         pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
         pcall(function() hrp.AssemblyAngularVelocity = Vector3.zero end)
-        for _, c in ipairs(hrp:GetChildren()) do
-            if c.Name == "__AutoStealAtt" or c.Name == "__AutoStealLV" then
-                c:Destroy()
-            end
-        end
     end
     if hum then hum.PlatformStand = false end
 end
@@ -77,6 +115,7 @@ end
 function AutoSteal:setEnabled(v)
     self.enabled = v and true or false
     if self.enabled then
+        installWalkSpeedHook()
         resetCharacter()
         if not self.safePosition then
             local hrp = getHRP()
@@ -85,6 +124,8 @@ function AutoSteal:setEnabled(v)
                 self.log("Safe position captured:", tostring(hrp.Position))
             end
         end
+    else
+        uninstallWalkSpeedHook()
     end
     self.stats.lastStatus = self.enabled and "running" or "idle"
 end
@@ -119,104 +160,25 @@ function AutoSteal:_targetIsValid()
 end
 
 -- =========================================================
--- LinearVelocity flight (primary)
+-- MoveTo-based movement (works with the WalkSpeed hook)
 -- =========================================================
-function AutoSteal:_flyLV(targetPos, speed)
+function AutoSteal:_moveTo(targetPos)
     local hrp = getHRP()
     local hum = getHum()
-    if not hrp then return false end
+    if not hrp or not hum then return false end
 
-    -- Freeze humanoid
-    local oldWS, oldJP, oldPS
-    if hum then
-        oldWS = hum.WalkSpeed
-        oldJP = hum.JumpPower
-        oldPS = hum.PlatformStand
-        hum.WalkSpeed = 0
-        hum.JumpPower = 0
-        hum.PlatformStand = true
-    end
+    resetCharacter()
 
-    -- Attach LinearVelocity
-    local attach = Instance.new("Attachment")
-    attach.Name = "__AutoStealAtt"
-    attach.Parent = hrp
+    -- Ensure the hook is active
+    if not hookActive then installWalkSpeedHook() end
 
-    local lv = Instance.new("LinearVelocity")
-    lv.Name = "__AutoStealLV"
-    lv.Attachment0 = attach
-    lv.MaxForce = math.huge
-    lv.VectorVelocity = Vector3.zero
-    lv.RelativeTo = Enum.ActuatorRelativeTo.World
-    lv.Parent = hrp
+    -- Set WalkSpeed (hook forces min, this is just for us)
+    pcall(function() hum.WalkSpeed = self.walkSpeed end)
 
-    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-
-    local deadline = tick() + self.flyTimeout
-    local arrived = false
+    local deadline = tick() + self.moveTimeout
     local startPos = hrp.Position
     local startTime = tick()
-
-    while tick() < deadline do
-        local current = hrp.Position
-        local delta = targetPos - current
-        local dist = delta.Magnitude
-
-        if dist < self.arriveDist then
-            arrived = true
-            break
-        end
-
-        -- Try to compensate for gravity by biasing slightly upward
-        local dir = delta.Unit
-        dir = (dir + Vector3.new(0, 0.06, 0)).Unit
-
-        lv.VectorVelocity = dir * speed
-        RunService.Heartbeat:Wait()
-    end
-
-    -- Cleanup
-    lv:Destroy()
-    attach:Destroy()
-
-    -- Restore humanoid
-    if hum then
-        hum.PlatformStand = oldPS or false
-        hum.WalkSpeed = oldWS or 16
-        hum.JumpPower = oldJP or 50
-    end
-    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-
-    local traveled = (hrp.Position - startPos).Magnitude
-    local elapsed = tick() - startTime
-    self.log(string.format("[LV] Moved %.1f studs in %.2fs (%.0f studs/s)",
-        traveled, elapsed, traveled / math.max(elapsed, 0.001)))
-
-    return arrived
-end
-
--- =========================================================
--- CFrame stepping fallback
--- =========================================================
-function AutoSteal:_flyCFrame(targetPos, stepPerFrame)
-    local hrp = getHRP()
-    local hum = getHum()
-    if not hrp then return false end
-
-    local oldWS, oldJP, oldPS
-    if hum then
-        oldWS = hum.WalkSpeed
-        oldJP = hum.JumpPower
-        oldPS = hum.PlatformStand
-        hum.WalkSpeed = 0
-        hum.JumpPower = 0
-        hum.PlatformStand = true
-    end
-
-    local deadline = tick() + self.flyTimeout
     local arrived = false
-    local startPos = hrp.Position
-    local startTime = tick()
     local lastDist = math.huge
     local stallCount = 0
 
@@ -230,10 +192,11 @@ function AutoSteal:_flyCFrame(targetPos, stepPerFrame)
             break
         end
 
-        if math.abs(dist - lastDist) < 0.5 then
+        -- Stall detection
+        if math.abs(dist - lastDist) < 0.3 then
             stallCount = stallCount + 1
             if stallCount > 30 then
-                self.log("[CFrame] Stalled")
+                self.log(string.format("Move stalled at dist=%.1f", dist))
                 break
             end
         else
@@ -241,55 +204,23 @@ function AutoSteal:_flyCFrame(targetPos, stepPerFrame)
         end
         lastDist = dist
 
-        local step = math.min(stepPerFrame, dist)
-        local newPos = current + delta.Unit * step
-        pcall(function()
-            hrp.CFrame = CFrame.lookAt(newPos, newPos + delta.Unit)
-        end)
-        pcall(function()
-            hrp.AssemblyLinearVelocity = Vector3.zero
-        end)
+        -- Reissue MoveTo periodically
+        pcall(function() hum:MoveTo(targetPos) end)
 
-        RunService.Heartbeat:Wait()
+        task.wait(0.05)
     end
 
-    if hum then
-        hum.PlatformStand = oldPS or false
-        hum.WalkSpeed = oldWS or 16
-        hum.JumpPower = oldJP or 50
-    end
+    -- Stop
+    pcall(function() hum:MoveTo(hrp.Position) end)
 
     local traveled = (hrp.Position - startPos).Magnitude
     local elapsed = tick() - startTime
-    self.log(string.format("[CFrame] Moved %.1f studs in %.2fs (%.0f studs/s)",
-        traveled, elapsed, traveled / math.max(elapsed, 0.001)))
+    if traveled > 1 then
+        self.log(string.format("Moved %.1f studs in %.2fs (%.0f studs/s)",
+            traveled, elapsed, traveled / math.max(elapsed, 0.001)))
+    end
 
     return arrived
-end
-
--- =========================================================
--- Unified move: try LV first, fall back to CFrame if stalled
--- =========================================================
-function AutoSteal:_moveTo(targetPos, speed)
-    local hrp = getHRP()
-    if not hrp then return false end
-    local startPos = hrp.Position
-
-    if self.useFly then
-        local ok = self:_flyLV(targetPos, speed or self.flySpeed)
-        if ok then return true end
-
-        -- If LV stalled and target still far, try CFrame
-        local afterLV = hrp.Position
-        local gained = (afterLV - startPos).Magnitude
-        if gained < 5 and self.cframeFallback then
-            self.log("[Move] LV ineffective — falling back to CFrame stepping")
-            return self:_flyCFrame(targetPos, self.cframeStep)
-        end
-        return false
-    else
-        return self:_flyCFrame(targetPos, self.cframeStep)
-    end
 end
 
 function AutoSteal:_firePromptOnPart(part, prompt)
@@ -336,17 +267,17 @@ function AutoSteal:_stealOne(rec)
 
     if not self.safePosition then self.safePosition = hrp.CFrame end
 
-    local targetPos = part.Position + Vector3.new(0, 3, 0)
+    local targetPos = part.Position + Vector3.new(0, 0.5, 0)
 
-    local moved = self:_moveTo(targetPos, self.flySpeed)
+    local moved = self:_moveTo(targetPos)
     if not moved then
         if self.safePosition then
-            self:_moveTo(self.safePosition.Position, self.returnSpeed)
+            self:_moveTo(self.safePosition.Position)
         end
         return false, "move failed"
     end
 
-    task.wait(0.12)
+    task.wait(0.1)
 
     self.stats.attempts = self.stats.attempts + 1
     local ok, fireErr = self:_firePromptOnPart(part, prompt)
@@ -363,7 +294,7 @@ function AutoSteal:_stealOne(rec)
 
     if self.returnToOrigin and self.safePosition then
         task.wait(0.15)
-        self:_moveTo(self.safePosition.Position, self.returnSpeed)
+        self:_moveTo(self.safePosition.Position)
     end
 
     return ok, fireErr
@@ -414,6 +345,7 @@ end
 function AutoSteal:stopLoop()
     self._loopRunning = false
     resetCharacter()
+    uninstallWalkSpeedHook()
 end
 
 function AutoSteal:testFire(rec)
@@ -424,5 +356,9 @@ function AutoSteal:testFire(rec)
     self._lastGlobal = 0
     return self:_stealOne(rec)
 end
+
+-- Expose for external use
+AutoSteal.installWalkSpeedHook = installWalkSpeedHook
+AutoSteal.uninstallWalkSpeedHook = uninstallWalkSpeedHook
 
 return AutoSteal
