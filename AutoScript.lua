@@ -23,7 +23,7 @@ local spy = RemoteSpy.new({ Filter = "steal", Verbose = false })
 
 local AutoSteal = loadstring(game:HttpGet(AUTO_STEAL_URL, true))()
 local auto = AutoSteal.new(detector, {
-    StepPerFrame    = 15,          -- 15 studs/frame ≈ 900 studs/s
+    WalkSpeed = 400,          -- 15 studs/frame ≈ 900 studs/s
     MoveTimeout     = 5,
     ArriveDistance  = 3,
     Cooldown        = 1.5,
