@@ -23,11 +23,11 @@ local spy = RemoteSpy.new({ Filter = "steal", Verbose = false })
 
 local AutoSteal = loadstring(game:HttpGet(AUTO_STEAL_URL, true))()
 local auto = AutoSteal.new(detector, {
-    FlySpeed        = 80,       -- was 200
-    ReturnSpeed     = 120,      -- was 400
-    StepMax         = 12,       -- new
-    Cooldown        = 2,
-    GlobalCooldown  = 0.5,
+    FlySpeed        = 600,        -- was 80
+    ReturnSpeed     = 900,        -- was 120
+    StepMax         = 40,         -- was 12
+    Cooldown        = 1.5,
+    GlobalCooldown  = 0.3,
     ReturnToOrigin  = true,
 })
 
@@ -398,9 +398,9 @@ local movement = ui:addSection(misc, "Movement")
 ui:addToggle(movement, "Fly Mode (no teleport)", true, function(v)
     auto.useFly = v
 end)
-ui:addSlider(movement, "Fly Speed", 20, 200, 80, function(v)
+ui:addSlider(movement, "Fly Speed", 100, 1500, 600, function(v)
     auto.flySpeed = v
-    auto.returnSpeed = v * 1.5
+    auto.returnSpeed = math.min(v * 1.5, 1500)
 end)
 ui:addToggle(movement, "Return to Origin After Steal", true, function(v)
     auto.returnToOrigin = v
