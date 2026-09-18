@@ -3,7 +3,7 @@ local Players     = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
-local UI_URL = "https://raw.githubusercontent.com/howiieee/Keyless-Steal-An-Egg-Script/refs/heads/main/AutomationUI.lua"
+local UI_URL = "https://raw.githubusercontent.com/Clide01/PlundererHub/refs/heads/main/ScreenUI.lua"
 
 local AutoUI = loadstring(game:HttpGet(UI_URL, true))()
 local ui = AutoUI.new(PlayerGui, {
