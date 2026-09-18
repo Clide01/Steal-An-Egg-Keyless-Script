@@ -96,7 +96,7 @@ function AutoSteal:_stealOne(rec)
     local target = part.Position + Vector3.new(0, 4, 0)
     hrp.CFrame = CFrame.new(target)
     hrp.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.35)
+    task.wait(0.5)
 
     -- Fire it
     self.stats.attempts = self.stats.attempts + 1
