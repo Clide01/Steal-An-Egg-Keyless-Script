@@ -329,68 +329,55 @@ end
 -- SELL: snapshot -> unequip/unfavorite -> sell -> report
 ------------------------------------------------------------
 local function teleportAndSell()
-    local before = snapshotInventory(false)
-    local beforePets = countTable(before.pets)
-    local beforeEggs = countTable(before.eggs)
-    log(("Inventory before: %d pets, %d eggs"):format(beforePets, beforeEggs))
-    if beforePets == 0 and beforeEggs == 0 then return end
+    local snap = snapshotInventory(true)
 
-    local serverPayload = { Eggs = {}, Assets = {} }
-    for uid in pairs(before.pets) do table.insert(serverPayload.Assets, uid) end
-    for uid in pairs(before.eggs) do table.insert(serverPayload.Eggs, uid)   end
-
-    -- Fire the sell remote directly — no teleport
-    pcall(function()
-        Remotes.PetSatchel.SellSelection:FireServer(serverPayload)
-    end)
-    task.wait(1.5)
-
-    -- Poll for save to reflect the sale
-    local after = nil
-    local deadline = os.clock() + SALE_POLL_TIMEOUT
-    while os.clock() < deadline do
-        after = snapshotInventory(true)
-        local removed = 0
-        for uid in pairs(before.pets) do if not after.pets[uid] then removed = removed + 1 end end
-        for uid in pairs(before.eggs) do if not after.eggs[uid] then removed = removed + 1 end end
-        if removed > 0 then
-            log(("Detected %d removed"):format(removed))
-            break
-        end
-        task.wait(SALE_POLL_INTERVAL)
+    local petUids, eggUids = {}, {}
+    local details = {}
+    for uid, d in pairs(snap.pets) do
+        table.insert(petUids, uid)
+        table.insert(details, d)
+    end
+    for uid, d in pairs(snap.eggs) do
+        table.insert(eggUids, uid)
+        table.insert(details, d)
     end
 
-    if not after then after = snapshotInventory(true) end
-
-    -- Diff
-    local soldPets, soldEggs = {}, {}
-    local soldDetails = {}
-    for uid, d in pairs(before.pets) do
-        if not after.pets[uid] then
-            table.insert(soldPets, uid)
-            table.insert(soldDetails, d)
-        end
-    end
-    for uid, d in pairs(before.eggs) do
-        if not after.eggs[uid] then
-            table.insert(soldEggs, uid)
-            table.insert(soldDetails, d)
-        end
-    end
-
-    log(("Actually sold: %d pets, %d eggs (was %d / %d)")
-        :format(#soldPets, #soldEggs, beforePets, beforeEggs))
-
-    if #soldDetails == 0 then
-        warn("[Counter] Sale detected 0 removed items — not reporting (avoids false positives).")
+    local total = #petUids + #eggUids
+    log(("Snapshot: %d pets, %d eggs (total %d)"):format(#petUids, #eggUids, total))
+    if total == 0 then
+        log("Inventory empty — nothing to sell.")
         return
     end
 
-    local allSoldUids = {}
-    for _, u in ipairs(soldPets) do table.insert(allSoldUids, u) end
-    for _, u in ipairs(soldEggs) do table.insert(allSoldUids, u) end
-    local reportId = computeReportId(allSoldUids)
-    reportSales(soldDetails, reportId)
+    local serverPayload = { Eggs = eggUids, Assets = petUids }
+    local hrp = getHRP()
+    local pos = findSellPosition()
+
+    if not hrp or not pos then
+        Remotes.PetSatchel.SellSelection:FireServer(serverPayload)
+        task.wait(SELL_WAIT)
+    else
+        local savedCF  = hrp.CFrame
+        local savedVel = hrp.AssemblyLinearVelocity
+
+        hrp.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        task.wait(0.6)
+
+        pcall(function()
+            Remotes.PetSatchel.SellSelection:FireServer(serverPayload)
+        end)
+        task.wait(SELL_WAIT)
+
+        hrp.CFrame = savedCF
+        pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
+    end
+
+    local allUids = {}
+    for _, u in ipairs(petUids) do table.insert(allUids, u) end
+    for _, u in ipairs(eggUids) do table.insert(allUids, u) end
+    local reportId = computeReportId(allUids)
+    reportSales(details, reportId)
 end
 
 ------------------------------------------------------------
