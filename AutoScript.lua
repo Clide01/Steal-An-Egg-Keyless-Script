@@ -39,9 +39,15 @@ ui:addToggle(autoSection, "Auto Steal Selected Eggs", false, function(v) end)
 ui:addToggle(autoSection, "Auto Steal Secret Egg", false, function(v) end)
 
 local filterSection = ui:addSection(main, "Filters")
-ui:addDropdown(filterSection, "Areas to Steal", {
-    "All", "Starter Island", "Desert", "Snow", "Volcano", "Space"
-}, "All", function(v) Filters.Area = v end)
+
+local areaList = { "All" }
+for _, name in ipairs(detector:getAreas()) do
+    table.insert(areaList, name)
+end
+ui:addDropdown(filterSection, "Areas to Steal", areaList, "All", function(v)
+    Filters.Area = v
+end)
+
 ui:addDropdown(filterSection, "Egg Rarities to Steal", {
     "All", "Common", "Uncommon", "Rare", "Epic",
     "Legendary", "Mythic", "Divine", "Eternal", "Cosmic", "Secret"
@@ -150,9 +156,15 @@ ui:addDropdown(eggControls, "Show Rarity", {
     "All", "Common", "Uncommon", "Rare", "Epic",
     "Legendary", "Mythic", "Divine", "Eternal", "Cosmic", "Secret"
 }, "All", function(v) eggRarityFilter = v; renderEggList() end)
-ui:addDropdown(eggControls, "Show Area", {
-    "All", "Starter Island", "Desert", "Snow", "Volcano", "Space"
-}, "All", function(v) eggAreaFilter = v; renderEggList() end)
+
+local areaList = { "All" }
+for _, name in ipairs(detector:getAreas()) do
+    table.insert(areaList, name)
+end
+ui:addDropdown(filterSection, "Areas to Steal", areaList, "All", function(v)
+    Filters.Area = v
+end)
+
 ui:addButton(eggControls, "Force Rescan", function()
     detector:stop(); task.wait(0.3); detector:start()
 end)
