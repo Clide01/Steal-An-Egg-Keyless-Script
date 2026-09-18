@@ -23,9 +23,9 @@ local spy = RemoteSpy.new({ Filter = "steal", Verbose = false })
 
 local AutoSteal = loadstring(game:HttpGet(AUTO_STEAL_URL, true))()
 local auto = AutoSteal.new(detector, {
-    UseFly          = true,
-    FlySpeed        = 200,
-    ReturnSpeed     = 400,
+    FlySpeed        = 80,       -- was 200
+    ReturnSpeed     = 120,      -- was 400
+    StepMax         = 12,       -- new
     Cooldown        = 2,
     GlobalCooldown  = 0.5,
     ReturnToOrigin  = true,
@@ -166,6 +166,17 @@ ui:addDropdown(eggControls, "Show Rarity", {
 ui:addDropdown(eggControls, "Show Area", {
     "All", "Desert", "Forest", "Prehistoric", "Volcano", "Light Dark"
 }, "All", function(v) eggAreaFilter = v; renderEggList() end)
+ui:addDropdown(eggControls, "Distance Filter", {
+    "Nearby (100m)", "Close (300m)", "Mid (1000m)", "Far (3000m)", "Everything"
+}, "Nearby (100m)", function(v)
+    if v == "Everything" then detector.maxDistance = math.huge
+    elseif v == "Nearby (100m)" then detector.maxDistance = 100
+    elseif v == "Close (300m)" then detector.maxDistance = 300
+    elseif v == "Mid (1000m)" then detector.maxDistance = 100
+    elseif v == "Far (3000m)" then detector.maxDistance = 3000
+    end
+    renderEggList()
+end)
 ui:addButton(eggControls, "Force Rescan", function()
     detector:stop(); task.wait(0.3); detector:start()
 end)
@@ -387,9 +398,9 @@ local movement = ui:addSection(misc, "Movement")
 ui:addToggle(movement, "Fly Mode (no teleport)", true, function(v)
     auto.useFly = v
 end)
-ui:addSlider(movement, "Fly Speed", 20, 500, 200, function(v)
+ui:addSlider(movement, "Fly Speed", 20, 200, 80, function(v)
     auto.flySpeed = v
-    auto.returnSpeed = v * 2
+    auto.returnSpeed = v * 1.5
 end)
 ui:addToggle(movement, "Return to Origin After Steal", true, function(v)
     auto.returnToOrigin = v
