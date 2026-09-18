@@ -1,4 +1,4 @@
--- AutoScript.lua v1.6.0
+-- AutoScript.lua v1.7.0
 local Players     = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
@@ -23,9 +23,9 @@ local spy = RemoteSpy.new({ Filter = "steal", Verbose = false })
 
 local AutoSteal = loadstring(game:HttpGet(AUTO_STEAL_URL, true))()
 local auto = AutoSteal.new(detector, {
-    WalkSpeed       = 250,        -- how fast to move
-    MoveTimeout     = 6,          -- max seconds per hop
-    ArriveDistance  = 3,          -- consider "arrived" within N studs
+    StepPerFrame    = 15,          -- 15 studs/frame ≈ 900 studs/s
+    MoveTimeout     = 5,
+    ArriveDistance  = 3,
     Cooldown        = 1.5,
     GlobalCooldown  = 0.3,
     ReturnToOrigin  = true,
@@ -34,9 +34,7 @@ local auto = AutoSteal.new(detector, {
 local Filters = { Rarity = "All", Area = "All" }
 _G.PlundererFilters = Filters
 
--- Shared UI state for target highlight
-local rowRefs = {}     -- [instance] = row frame
-local targetListenerId = nil
+local rowRefs = {}
 
 -- =========================================================
 -- Main tab
@@ -49,7 +47,6 @@ ui:addToggle(autoSection, "Auto Steal Egg", false, function(v)
     ui:setStatus(v and "Stealing..." or "Idle", v and "running" or "idle")
 end)
 ui:addToggle(autoSection, "Use Selected Target Only", false, function(v)
-    -- When on, target must be set. If target is nil, auto-steal idles.
     _G.PlundererTargetOnly = v
     print("[AutoUI] Target-only mode:", v)
 end)
@@ -65,7 +62,7 @@ ui:addDropdown(filterSection, "Egg Rarities to Steal", {
 ui:addSlider(filterSection, "Max Pets to Keep", 0, 250, 50, function(v) end)
 
 -- =========================================================
--- Steal tab — live stats + target indicator
+-- Steal tab
 -- =========================================================
 local stealTab = ui:addTab("Steal", "⚡")
 local statsSection = ui:addSection(stealTab, "Live Stats")
@@ -125,7 +122,6 @@ ui:addButton(statsSection, "Set Safe Position Here", function()
     end
 end)
 
--- Stats poll
 task.spawn(function()
     while true do
         statAttempts.Text  = tostring(auto.stats.attempts)
@@ -153,7 +149,7 @@ task.spawn(function()
 end)
 
 -- =========================================================
--- Eggs tab — clickable rows
+-- Eggs tab
 -- =========================================================
 local eggsTab = ui:addTab("Eggs", "🥚")
 local eggControls = ui:addSection(eggsTab, "Detection")
@@ -172,7 +168,7 @@ ui:addDropdown(eggControls, "Distance Filter", {
     if v == "Everything" then detector.maxDistance = math.huge
     elseif v == "Nearby (100m)" then detector.maxDistance = 100
     elseif v == "Close (300m)" then detector.maxDistance = 300
-    elseif v == "Mid (1000m)" then detector.maxDistance = 100
+    elseif v == "Mid (1000m)" then detector.maxDistance = 1000
     elseif v == "Far (3000m)" then detector.maxDistance = 3000
     end
     renderEggList()
@@ -218,7 +214,6 @@ end
 local function makeRow(rec)
     rowIndex = rowIndex + 1
 
-    -- Row is a TextButton so it can be clicked
     local row = Instance.new("TextButton")
     row.Size = UDim2.new(1, 0, 0, 34)
     row.BackgroundColor3 = Color3.fromRGB(22, 22, 31)
@@ -230,7 +225,6 @@ local function makeRow(rec)
     row.Parent = listFrame
     Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
 
-    -- Rarity dot
     local dot = Instance.new("Frame")
     dot.Size = UDim2.fromOffset(8, 8)
     dot.Position = UDim2.new(0, 10, 0.5, -4)
@@ -239,7 +233,6 @@ local function makeRow(rec)
     dot.Parent = row
     Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
 
-    -- Name
     local nameLbl = Instance.new("TextLabel")
     nameLbl.BackgroundTransparency = 1
     nameLbl.Position = UDim2.fromOffset(26, 0)
@@ -252,7 +245,6 @@ local function makeRow(rec)
     nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
     nameLbl.Parent = row
 
-    -- Area tag
     local areaLbl = Instance.new("TextLabel")
     areaLbl.BackgroundTransparency = 1
     areaLbl.Position = UDim2.fromOffset(26, -8)
@@ -264,7 +256,6 @@ local function makeRow(rec)
     areaLbl.TextXAlignment = Enum.TextXAlignment.Left
     areaLbl.Parent = row
 
-    -- Rarity pill
     local pill = Instance.new("TextLabel")
     pill.AnchorPoint = Vector2.new(1, 0.5)
     pill.Position = UDim2.new(1, -70, 0.5, 0)
@@ -279,7 +270,6 @@ local function makeRow(rec)
     pill.Parent = row
     Instance.new("UICorner", pill).CornerRadius = UDim.new(0, 9)
 
-    -- Distance
     local distLbl = Instance.new("TextLabel")
     distLbl.AnchorPoint = Vector2.new(1, 0.5)
     distLbl.Position = UDim2.new(1, -6, 0.5, 0)
@@ -292,17 +282,13 @@ local function makeRow(rec)
     distLbl.TextXAlignment = Enum.TextXAlignment.Right
     distLbl.Parent = row
 
-    -- Highlight if this row's instance is the current target
     local isTarget = (auto:getTarget() and auto:getTarget().instance == rec.instance)
     styleRow(row, isTarget)
 
-    -- Click → set as target
     row.MouseButton1Click:Connect(function()
         auto:setTarget(rec)
         refreshAllRows()
     end)
-
-    -- Hover
     row.MouseEnter:Connect(function()
         if not (auto:getTarget() and auto:getTarget().instance == rec.instance) then
             row.BackgroundTransparency = 0.15
@@ -317,7 +303,6 @@ local function makeRow(rec)
     rowRefs[rec.instance] = row
 end
 
--- Refreshes just the highlight styling of existing rows (no rebuild)
 function refreshAllRows()
     for _, row in pairs(rowRefs) do
         if row and row.Parent then
@@ -387,19 +372,11 @@ local misc = ui:addTab("Misc", "⚙️")
 local perf = ui:addSection(misc, "Performance")
 ui:addToggle(perf, "Low Graphics Mode", false, function(v) end)
 ui:addToggle(perf, "Silent Mode (no meme)", false, function(v) end)
-ui:addSlider(perf, "Walk Speed", 16, 200, 16, function(v)
-    local char = LocalPlayer.Character
-    if char and char:FindFirstChildOfClass("Humanoid") then
-        char.Humanoid.WalkSpeed = v
-    end
-end)
 
 local movement = ui:addSection(misc, "Movement")
-ui:addSlider(movement, "Walk Speed", 100, 500, 250, function(v)
-    auto.walkSpeed = v
-    local char = LocalPlayer.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if hum then hum.WalkSpeed = v end
+ui:addSlider(movement, "Speed (studs/frame)", 5, 40, 15, function(v)
+    auto.stepPerFrame = v
+    ui:setBottomStatus(string.format("Move speed: %d studs/frame (~%d studs/s)", v, v * 60))
 end)
 ui:addToggle(movement, "Return to Origin After Steal", true, function(v)
     auto.returnToOrigin = v
@@ -418,6 +395,6 @@ ui:addButton(links, "Reload UI", function()
 end)
 
 ui:setStatus("Idle", "idle")
-ui:setBottomStatus("Ready — v1.6.0")
+ui:setBottomStatus("Ready — v1.7.0")
 
 auto:startLoop(Filters)
