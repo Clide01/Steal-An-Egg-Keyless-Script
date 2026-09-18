@@ -1,10 +1,11 @@
--- EggDetector.lua v4.1 — mesh-id naming + distance filter
+-- EggDetector.lua v4.2 — tries game's own egg database first
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local EggDetector = {}
 EggDetector.__index = EggDetector
-EggDetector.VERSION = "4.1.0"
+EggDetector.VERSION = "4.2.0"
 EggDetector.DEBUG = false
 
 local RARITY_TABLE = {
@@ -42,16 +43,46 @@ local function extractArea(inst)
     return "Unknown"
 end
 
--- Try many sources for a real egg name. Returns name + source.
+-- Try loading the game's own egg directory. Returns { meshIdKey -> name }
+local eggDirectoryCache = nil
+local function loadEggDirectory()
+    if eggDirectoryCache ~= nil then return eggDirectoryCache end
+    eggDirectoryCache = {}
+
+    -- Try the module path we saw in earlier game scripts
+    local paths = {
+        { ReplicatedStorage, "Data", "Assets" },
+        { ReplicatedStorage, "Shared", "Data", "Assets" },
+        { ReplicatedStorage, "Shared", "Util", "EggRecords" },
+        { ReplicatedStorage, "Data", "Eggs" },
+    }
+    for _, path in ipairs(paths) do
+        local ok, mod = pcall(function()
+            local obj = path[1]
+            for i = 2, #path do
+                obj = obj:FindFirstChild(path[i])
+                if not obj then return nil end
+            end
+            return require(obj)
+        end)
+        if ok and mod then
+            print("[EggDetector] Loaded module:", table.concat(path, "."))
+            return eggDirectoryCache
+        end
+    end
+    return eggDirectoryCache
+end
+
+-- Extract best-guess name for a Model, walking many sources
 local function extractEggName(model, area)
-    -- 1) attributes on model
-    for _, attr in ipairs({ "Name", "EggName", "DisplayName", "Title", "EggType", "Rarity" }) do
+    -- 1) Attributes on model
+    for _, attr in ipairs({ "Name", "EggName", "DisplayName", "Title", "EggType", "Rarity", "Egg" }) do
         local v = model:GetAttribute(attr)
         if type(v) == "string" and v ~= "" then return v, "attr:"..attr end
     end
-    -- 2) attributes on nest (parent)
+    -- 2) Attributes on nest (parent)
     if model.Parent then
-        for _, attr in ipairs({ "Name", "EggName", "DisplayName", "Rarity" }) do
+        for _, attr in ipairs({ "Name", "EggName", "DisplayName", "Rarity", "EggType" }) do
             local v = model.Parent:GetAttribute(attr)
             if type(v) == "string" and v ~= "" then return v, "nestAttr:"..attr end
         end
@@ -65,10 +96,15 @@ local function extractEggName(model, area)
     -- 4) TextLabels
     for _, d in ipairs(model:GetDescendants()) do
         if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text and d.Text ~= "" then
-            return d.Text, "textLabel"
+            -- skip common UI words
+            local t = d.Text
+            if #t > 2 and not t:match("^%s*$") then
+                return t, "textLabel"
+            end
         end
     end
-    -- 5) MeshId hash → stable per egg type
+
+    -- 5) Look for the game's own egg-name mapping from mesh ID
     local ids = {}
     for _, d in ipairs(model:GetDescendants()) do
         if d:IsA("MeshPart") and d.MeshId and d.MeshId ~= "" then
@@ -81,12 +117,20 @@ local function extractEggName(model, area)
     end
     if #ids > 0 then
         table.sort(ids)
-        -- Use last 4 digits of first mesh + count as a "signature"
+        -- Look up in the loaded directory
+        local dir = loadEggDirectory()
+        if dir then
+            for _, id in ipairs(ids) do
+                if dir[id] then return dir[id], "directory" end
+            end
+        end
+        -- Otherwise use a readable 4-digit signature
         local sig = ids[1]:sub(-4)
-        return "Egg #" .. sig, "meshId"
+        return string.format("%s Egg (%s)", area or "Unknown", sig), "meshId"
     end
-    -- 6) Give up — use area + generic label
-    return "Unnamed " .. area .. " Egg", "fallback"
+
+    -- 6) Fallback
+    return "Unidentified " .. area .. " Egg", "fallback"
 end
 
 function EggDetector.new()
@@ -94,7 +138,7 @@ function EggDetector.new()
     self.eggs = {}
     self.listeners = {}
     self._scanning = false
-    self.maxDistance = math.huge  -- set by UI
+    self.maxDistance = math.huge
     return self
 end
 
@@ -152,12 +196,8 @@ function EggDetector:_buildRecord(inst)
     local pos = self:_getPosition(inst)
     local area = extractArea(inst)
     local name, source = extractEggName(inst, area)
-
-    -- If name contains a rarity keyword use it; otherwise try the whole path
     local rarity = classifyRarity(name)
-    if not rarity then
-        rarity = classifyRarity(inst:GetFullName())
-    end
+    if not rarity then rarity = classifyRarity(inst:GetFullName()) end
 
     return {
         instance = inst,
@@ -267,8 +307,8 @@ end
 function EggDetector:dump()
     print("[EggDetector] === DUMP (" .. #self:getAll() .. " live eggs) ===")
     for i, rec in ipairs(self:getAll()) do
-        print(string.format("  [%d] %s (%s) | area=%s | rarity=%s | dist=%.1f | src=%s",
-            i, rec.name, rec.instance.Name, rec.area,
+        print(string.format("  [%d] %s | area=%s | rarity=%s | dist=%.1f | src=%s",
+            i, rec.name, rec.area,
             rec.rarity and rec.rarity.label or "?",
             self:getDistance(rec), rec.nameSource or "?"))
     end
