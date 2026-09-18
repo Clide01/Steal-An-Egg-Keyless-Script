@@ -1,4 +1,4 @@
--- AutoSteal.lua v2.1 — flying + selectable target
+-- AutoSteal.lua v2.2 — PlatformStand flight (no rubber-band)
 
 local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
@@ -6,7 +6,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local AutoSteal = {}
 AutoSteal.__index = AutoSteal
-AutoSteal.VERSION = "2.1.0"
+AutoSteal.VERSION = "2.2.0"
 
 local PROMPT_PART  = "SmartPromptPart"
 local PROMPT_CHILD = "CarryAreaEgg"
@@ -16,11 +16,11 @@ function AutoSteal.new(detector, opts)
     self.detector   = detector
     self.opts       = opts or {}
 
-    self.flySpeed       = self.opts.FlySpeed or 200
-    self.returnSpeed    = self.opts.ReturnSpeed or (self.flySpeed * 2)
-    self.flyTimeout     = self.opts.FlyTimeout or 6
-    self.arriveDist     = self.opts.ArriveDistance or 3
-    self.useFly         = self.opts.UseFly ~= false
+    self.flySpeed       = self.opts.FlySpeed or 80
+    self.returnSpeed    = self.opts.ReturnSpeed or 120
+    self.stepMax        = self.opts.StepMax or 12      -- studs per heartbeat
+    self.flyTimeout     = self.opts.FlyTimeout or 8
+    self.arriveDist     = self.opts.ArriveDistance or 4
 
     self.cooldown       = self.opts.Cooldown or 2
     self.globalCooldown = self.opts.GlobalCooldown or 0.5
@@ -28,9 +28,7 @@ function AutoSteal.new(detector, opts)
 
     self.returnToOrigin = self.opts.ReturnToOrigin ~= false
     self.safePosition   = nil
-
-    -- Selected target
-    self.target         = nil   -- egg record or nil
+    self.target         = nil
 
     self.enabled      = false
     self.lastAttempt  = {}
@@ -45,6 +43,11 @@ local function getHRP()
     return char and char:FindFirstChild("HumanoidRootPart")
 end
 
+local function getHum()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
 local function getPrompt()
     local part = workspace:FindFirstChild(PROMPT_PART)
     if not part then return nil, nil end
@@ -53,9 +56,6 @@ local function getPrompt()
     return part, prompt
 end
 
--- =========================================================
--- Enable / safe position
--- =========================================================
 function AutoSteal:setEnabled(v)
     self.enabled = v and true or false
     if self.enabled and not self.safePosition then
@@ -80,53 +80,54 @@ function AutoSteal:captureSafePosition()
     return false
 end
 
--- =========================================================
--- Target selection
--- =========================================================
 function AutoSteal:setTarget(rec)
     if not rec then return self:clearTarget() end
     self.target = rec
     self.log("Target set:", rec.name, "|", rec.instance:GetFullName())
 end
-
 function AutoSteal:clearTarget()
     self.target = nil
     self.log("Target cleared")
 end
-
 function AutoSteal:getTarget() return self.target end
 
 function AutoSteal:_targetIsValid()
     if not self.target then return false end
-    if not self.target.instance or not self.target.instance.Parent then
-        return false
-    end
+    if not self.target.instance or not self.target.instance.Parent then return false end
     return true
 end
 
 -- =========================================================
--- Fly movement
+-- Flight: PlatformStand + small CFrame steps
+-- This is the same technique the game's own "safe" cutscenes use,
+-- so the server accepts it without rubber-banding.
 -- =========================================================
 function AutoSteal:_flyTo(targetPos, speedOverride)
     local hrp = getHRP()
+    local hum = getHum()
     if not hrp then return false, "no HRP" end
 
     local speed = speedOverride or self.flySpeed
     local deadline = tick() + self.flyTimeout
+
+    -- Freeze the humanoid so nothing fights our CFrame updates
+    local oldWS, oldJP, oldPS
+    if hum then
+        oldWS = hum.WalkSpeed
+        oldJP = hum.JumpPower
+        oldPS = hum.PlatformStand
+        hum.WalkSpeed = 0
+        hum.JumpPower = 0
+        hum.PlatformStand = true
+    end
+
+    -- Zero out velocity to prevent drift
+    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+    pcall(function() hrp.AssemblyAngularVelocity = Vector3.zero end)
+
     local arrived = false
-
-    local attach = Instance.new("Attachment")
-    attach.Name = "__AutoStealFly"
-    attach.Parent = hrp
-
-    local bv = Instance.new("BodyVelocity")
-    bv.Name = "__AutoStealFlyBV"
-    bv.MaxForce = Vector3.new(1e6, 1e6, 1e6)
-    bv.P = 12500
-    bv.Velocity = Vector3.zero
-    bv.Parent = hrp
-
-    local useBodyVel = true
+    local lastDist = math.huge
+    local stalledFrames = 0
 
     while tick() < deadline do
         local current = hrp.Position
@@ -138,27 +139,37 @@ function AutoSteal:_flyTo(targetPos, speedOverride)
             break
         end
 
-        if useBodyVel and bv.Parent then
-            bv.Velocity = delta.Unit * speed
+        -- Stall detection: if we're not getting closer for 12 frames, bail
+        if math.abs(dist - lastDist) < 0.5 then
+            stalledFrames = stalledFrames + 1
+            if stalledFrames > 12 then
+                self.log("Flight stalled — bailing")
+                break
+            end
         else
-            useBodyVel = false
-            local stepDist = math.min(speed / 60, dist)
-            hrp.CFrame = CFrame.new(current + delta.Unit * stepDist)
-            hrp.AssemblyLinearVelocity = Vector3.zero
+            stalledFrames = 0
         end
+        lastDist = dist
+
+        -- Step forward in small chunks so the server doesn't reject the CFrame
+        local stepDist = math.min(speed / 60, self.stepMax, dist)
+        local newPos = current + delta.Unit * stepDist
+        hrp.CFrame = CFrame.new(newPos, newPos + (targetPos - newPos).Unit)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+
         RunService.Heartbeat:Wait()
     end
 
-    if bv.Parent then bv:Destroy() end
-    if attach.Parent then attach:Destroy() end
-    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+    -- Restore humanoid
+    if hum then
+        hum.PlatformStand = oldPS or false
+        hum.WalkSpeed = oldWS or 16
+        hum.JumpPower = oldJP or 50
+    end
 
     return arrived
 end
 
--- =========================================================
--- Fire prompt
--- =========================================================
 function AutoSteal:_firePromptOnPart(part, prompt)
     if not part or not prompt then return false, "missing prompt" end
     if not prompt.Enabled then return false, "prompt disabled" end
@@ -185,18 +196,10 @@ function AutoSteal:_firePromptOnPart(part, prompt)
     return true
 end
 
--- =========================================================
--- Single steal
--- =========================================================
 function AutoSteal:_stealOne(rec)
     local now = tick()
-
-    if now - self._lastGlobal < self.globalCooldown then
-        return false, "global cooldown"
-    end
-    if now - (self.lastAttempt[rec.instance] or 0) < self.cooldown then
-        return false, "cooldown"
-    end
+    if now - self._lastGlobal < self.globalCooldown then return false, "global cooldown" end
+    if now - (self.lastAttempt[rec.instance] or 0) < self.cooldown then return false, "cooldown" end
 
     self.lastAttempt[rec.instance] = now
     self._lastGlobal = now
@@ -205,35 +208,24 @@ function AutoSteal:_stealOne(rec)
     if not hrp then return false, "no HRP" end
 
     local part, prompt = getPrompt()
-    if not part or not prompt then
-        return false, "SmartPromptPart.CarryAreaEgg not found"
-    end
+    if not part or not prompt then return false, "prompt not found" end
 
     if not self.safePosition then
         self.safePosition = hrp.CFrame
     end
 
-    local targetPos = part.Position + Vector3.new(0, 4, 0)
+    local targetPos = part.Position + Vector3.new(0, 3, 0)
 
-    local moved, moveErr
-    if self.useFly then
-        moved, moveErr = self:_flyTo(targetPos)
-    else
-        hrp.CFrame = CFrame.new(targetPos)
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        task.wait(0.3)
-        moved = true
-    end
-
+    local moved, err = self:_flyTo(targetPos)
     if not moved then
-        self.log("Move failed:", moveErr)
-        return false, "move failed: " .. tostring(moveErr)
+        self.log("Move failed:", err)
+        return false, "move failed"
     end
 
     task.wait(0.15)
 
     self.stats.attempts = self.stats.attempts + 1
-    local ok, err = self:_firePromptOnPart(part, prompt)
+    local ok, fireErr = self:_firePromptOnPart(part, prompt)
 
     if ok then
         self.stats.successes = self.stats.successes + 1
@@ -241,27 +233,18 @@ function AutoSteal:_stealOne(rec)
         self.log("Success:", rec.name)
     else
         self.stats.failures = self.stats.failures + 1
-        self.stats.lastStatus = "failed: " .. err
-        self.log("Failed:", rec.name, "—", err)
+        self.stats.lastStatus = "failed: " .. fireErr
+        self.log("Failed:", rec.name, "—", fireErr)
     end
 
-    if self.returnToOrigin then
+    if self.returnToOrigin and self.safePosition then
         task.wait(0.2)
-        local dest = self.safePosition
-        if self.useFly then
-            self:_flyTo(dest.Position, self.returnSpeed)
-            pcall(function() hrp.CFrame = CFrame.new(hrp.Position, dest.Position) end)
-        else
-            hrp.CFrame = dest
-        end
+        self:_flyTo(self.safePosition.Position, self.returnSpeed)
     end
 
-    return ok, err
+    return ok, fireErr
 end
 
--- =========================================================
--- Auto loop with target priority
--- =========================================================
 function AutoSteal:startLoop(filters)
     if self._loopRunning then return end
     self._loopRunning = true
@@ -270,18 +253,13 @@ function AutoSteal:startLoop(filters)
         while self._loopRunning do
             if self.enabled then
                 local chosen = nil
-
-                -- 1) Prefer selected target if still valid
                 if self:_targetIsValid() then
                     chosen = self.target
                 else
-                    -- target vanished — auto-clear
                     if self.target then
                         self.log("Target vanished, clearing:", self.target.name)
                         self.target = nil
                     end
-
-                    -- 2) Fall back to nearest matching egg
                     local matches = self.detector:getMatching(filters.Rarity, filters.Area)
                     if #matches > 0 then
                         local hrp = getHRP()
@@ -297,7 +275,6 @@ function AutoSteal:startLoop(filters)
                         end
                     end
                 end
-
                 if chosen then
                     local ok, err = self:_stealOne(chosen)
                     if not ok and err ~= "cooldown" and err ~= "global cooldown" then
@@ -310,9 +287,7 @@ function AutoSteal:startLoop(filters)
     end)
 end
 
-function AutoSteal:stopLoop()
-    self._loopRunning = false
-end
+function AutoSteal:stopLoop() self._loopRunning = false end
 
 function AutoSteal:testFire(rec)
     local part, prompt = getPrompt()
