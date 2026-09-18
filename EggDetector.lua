@@ -1,15 +1,12 @@
--- EggDetector.lua v2.0 — strict matching
--- Requires: "steal" in a ProximityPrompt AND "egg" somewhere in the entity's text.
--- Rejects: players, pets, upgrade prompts, SpawnLocations.
+-- EggDetector.lua v4.0 — path-aware
+-- Eggs live at: Workspace.__OBJECTS.Areas.GuardAreas.<AREA>.Nests.NestModel.Model
 
-local Players     = game:GetService("Players")
+local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
 local EggDetector = {}
 EggDetector.__index = EggDetector
-EggDetector.VERSION = "2.0.0"
-
--- Flip to true to print reject reasons in the console.
+EggDetector.VERSION = "4.0.0"
 EggDetector.DEBUG = false
 
 local RARITY_TABLE = {
@@ -37,85 +34,20 @@ local function classifyRarity(text)
     return nil
 end
 
-local function gatherAllText(inst)
-    local texts = { inst.Name }
-    for _, name in ipairs({ "Name", "EggName", "DisplayName", "Title", "Rarity", "Type" }) do
-        local v = inst:GetAttribute(name)
-        if type(v) == "string" and v ~= "" then table.insert(texts, v) end
-    end
-    for _, d in ipairs(inst:GetDescendants()) do
-        if d:IsA("TextLabel") and d.Text and d.Text ~= "" then
-            table.insert(texts, d.Text)
-        elseif d:IsA("TextButton") and d.Text and d.Text ~= "" then
-            table.insert(texts, d.Text)
-        elseif d:IsA("ProximityPrompt") then
-            if d.ActionText and d.ActionText ~= "" then table.insert(texts, d.ActionText) end
-            if d.ObjectText and d.ObjectText ~= "" then table.insert(texts, d.ObjectText) end
-        end
-    end
-    return table.concat(texts, " ")
-end
-
-local function hasForbiddenAncestor(inst)
+-- Extract "Desert" / "Volcano" / etc. from
+--   Workspace.__OBJECTS.Areas.GuardAreas.<AREA>.Nests...
+local function extractArea(inst)
     local p = inst
-    while p do
-        if p:IsA("Player") then return true, "under Player" end
-        if p:IsA("Accessory") then return true, "under Accessory" end
-        if p:IsA("Tool") then return true, "under Tool" end
-        if p:IsA("Model") and p:FindFirstChildOfClass("Humanoid") then
-            return true, "under Humanoid model"
-        end
-        p = p.Parent
-    end
-    return false, nil
-end
-
-local function isEggCandidate(inst)
-    if inst:IsA("SpawnLocation") then return false, "SpawnLocation class" end
-    if inst.Name == "SpawnLocation" then return false, "named SpawnLocation" end
-
-    local bad, why = hasForbiddenAncestor(inst)
-    if bad then return false, why end
-
-    -- Must have a steal-like ProximityPrompt
-    local hasSteal = false
-    for _, d in ipairs(inst:GetDescendants()) do
-        if d:IsA("ProximityPrompt") then
-            local pa = string.lower(d.ActionText or "")
-            local po = string.lower(d.ObjectText or "")
-            if string.find(pa, "steal", 1, true) or string.find(po, "steal", 1, true) then
-                hasSteal = true
-                break
-            end
-        end
-    end
-    if not hasSteal then return false, "no steal prompt" end
-
-    -- Reject upgrade prompts (+12/step)
-    local allText = gatherAllText(inst)
-    local lower = string.lower(allText)
-    if string.find(lower, "%+%d") or string.find(lower, "step", 1, true) then
-        return false, "upgrade-like text"
-    end
-
-    -- Must contain "egg" somewhere OR be under an egg-named ancestor
-    if string.find(lower, "egg", 1, true) then
-        return true, "ok (egg in text)"
-    end
-    local p = inst.Parent
     while p and p ~= workspace do
-        if string.find(string.lower(p.Name), "egg", 1, true) then
-            return true, "ok (under egg-named ancestor)"
+        local parent = p.Parent
+        if parent and parent.Name == "GuardAreas" then
+            return p.Name
         end
-        p = p.Parent
+        p = parent
     end
-
-    return false, "no 'egg' in text or ancestors"
+    return "Unknown"
 end
 
--- =========================================================
--- Constructor
--- =========================================================
 function EggDetector.new()
     local self = setmetatable({}, EggDetector)
     self.eggs = {}
@@ -142,33 +74,46 @@ function EggDetector:_emit(event, payload)
     end
 end
 
-function EggDetector:_findPromptAndTarget(inst)
-    local prompt
-    for _, d in ipairs(inst:GetDescendants()) do
-        if d:IsA("ProximityPrompt") then
-            local pa = string.lower(d.ActionText or "")
-            local po = string.lower(d.ObjectText or "")
-            if string.find(pa, "steal", 1, true) or string.find(po, "steal", 1, true) then
-                prompt = d
-                break
+local function getRoot()
+    local objs = workspace:FindFirstChild("__OBJECTS")
+    if not objs then return nil end
+    local areas = objs:FindFirstChild("Areas")
+    if not areas then return nil end
+    return areas:FindFirstChild("GuardAreas")
+end
+
+function EggDetector:_scan()
+    local out = {}
+    local root = getRoot()
+    if not root then return out end
+
+    for _, area in ipairs(root:GetChildren()) do
+        local nests = area:FindFirstChild("Nests")
+        if nests then
+            for _, nest in ipairs(nests:GetChildren()) do
+                -- Live egg is a "Model" child of NestModel
+                local eggModel = nest:FindFirstChild("Model")
+                if eggModel and eggModel:IsA("Model") then
+                    out[eggModel] = true
+                end
             end
         end
     end
+    return out
+end
 
-    local target
-    if inst:IsA("BasePart") then target = inst
-    elseif inst:IsA("Model") then target = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
-    else target = inst:FindFirstChildWhichIsA("BasePart", true) end
-
-    return prompt, target
+function EggDetector:_getPosition(inst)
+    if inst:IsA("BasePart") then return inst.Position end
+    local pp = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
+    return pp and pp.Position or nil
 end
 
 function EggDetector:_buildRecord(inst)
-    local prompt, target = self:_findPromptAndTarget(inst)
-    local allText = gatherAllText(inst)
-    local rarity = classifyRarity(allText)
-
+    local pos = self:_getPosition(inst)
+    local area = extractArea(inst)
     local displayName = inst.Name
+
+    -- Prefer a TextLabel inside if present
     for _, d in ipairs(inst:GetDescendants()) do
         if d:IsA("TextLabel") and d.Text and d.Text ~= "" then
             displayName = d.Text
@@ -176,67 +121,26 @@ function EggDetector:_buildRecord(inst)
         end
     end
 
+    -- Fallback: nest name might carry rarity
+    local parent = inst.Parent
+    if parent and parent.Name ~= "" and parent.Name ~= "Nests" then
+        if not classifyRarity(displayName) then
+            local combo = displayName .. " " .. parent.Name
+            local r = classifyRarity(combo)
+            if r then displayName = combo end
+        end
+    end
+
     return {
-        instance  = inst,
-        target    = target,
-        name      = displayName,
-        rarity    = rarity,
-        prompt    = prompt,
-        position  = target and target.Position or nil,
-        stealable = prompt ~= nil and prompt.Enabled ~= false,
+        instance = inst,
+        target   = inst:FindFirstChildWhichIsA("BasePart", true),
+        name     = displayName,
+        area     = area,
+        rarity   = classifyRarity(displayName),
+        position = pos,
+        prompt   = nil,
+        stealable = true,
     }
-end
-
--- =========================================================
--- Workspace-wide scan
--- =========================================================
-function EggDetector:_scan()
-    local found = {}
-    local rejected = {}
-    local kept = 0
-
-    for _, inst in ipairs(workspace:GetDescendants()) do
-        -- Only check Models, Folders, and Parts — skip every BasePart inside a model
-        if inst:IsA("Model") or inst:IsA("Folder") then
-            local hasPrompt = false
-            for _, d in ipairs(inst:GetDescendants()) do
-                if d:IsA("ProximityPrompt") then hasPrompt = true; break end
-            end
-            if hasPrompt then
-                local ok, reason = isEggCandidate(inst)
-                if ok then
-                    found[inst] = true
-                    kept = kept + 1
-                elseif EggDetector.DEBUG then
-                    table.insert(rejected, { name = inst:GetFullName(), reason = reason })
-                end
-            end
-        elseif inst:IsA("BasePart") and not inst:FindFirstAncestorWhichIsA("Model") then
-            -- standalone part with a prompt
-            local hasPrompt = false
-            for _, d in ipairs(inst:GetDescendants()) do
-                if d:IsA("ProximityPrompt") then hasPrompt = true; break end
-            end
-            if hasPrompt then
-                local ok, reason = isEggCandidate(inst)
-                if ok then
-                    found[inst] = true
-                    kept = kept + 1
-                elseif EggDetector.DEBUG then
-                    table.insert(rejected, { name = inst:GetFullName(), reason = reason })
-                end
-            end
-        end
-    end
-
-    if EggDetector.DEBUG then
-        print(string.format("[EggDetector] Scan: %d kept, %d rejected", kept, #rejected))
-        for i = 1, math.min(#rejected, 40) do
-            print(string.format("   ✗ %s — %s", rejected[i].name, rejected[i].reason))
-        end
-    end
-
-    return found
 end
 
 function EggDetector:_refresh()
@@ -261,25 +165,25 @@ function EggDetector:_refresh()
     end
 
     for inst, rec in pairs(self.eggs) do
-        local _, t = self:_findPromptAndTarget(inst)
-        if t then
-            rec.target = t
-            rec.position = t.Position
-        end
+        rec.position = self:_getPosition(inst)
+        rec.area = extractArea(inst)
+    end
+
+    if EggDetector.DEBUG then
+        print(string.format("[EggDetector] %d live eggs tracked", #self:getAll()))
     end
 end
 
 function EggDetector:start()
     if self._scanning then return end
     self._scanning = true
-    print("[EggDetector] v" .. EggDetector.VERSION .. " starting — strict mode")
-
+    print("[EggDetector] v" .. EggDetector.VERSION .. " starting (nest-based)")
     task.spawn(function()
         while self._scanning do
             local ok, err = pcall(function() self:_refresh() end)
             if not ok then warn("[EggDetector] Refresh error:", err) end
             self:_emit("refreshed", nil)
-            task.wait(2)
+            task.wait(1.5)
         end
     end)
 end
@@ -316,8 +220,7 @@ function EggDetector:getMatching(rarityFilter, areaFilter)
         end
         local areaOK = true
         if areaFilter and areaFilter ~= "All" then
-            local full = string.lower(rec.instance:GetFullName())
-            areaOK = string.find(full, string.lower(areaFilter), 1, true) ~= nil
+            areaOK = string.lower(rec.area or "") == string.lower(areaFilter)
         end
         if rarityOK and areaOK then table.insert(out, rec) end
     end
@@ -331,13 +234,27 @@ function EggDetector:getDistance(rec)
     return (rec.position - hrp.Position).Magnitude
 end
 
--- Call this from anywhere to see what the detector currently tracks.
+function EggDetector:getAreas()
+    local seen = {}
+    local list = {}
+    local root = getRoot()
+    if root then
+        for _, area in ipairs(root:GetChildren()) do
+            if not seen[area.Name] then
+                seen[area.Name] = true
+                table.insert(list, area.Name)
+            end
+        end
+    end
+    return list
+end
+
 function EggDetector:dump()
-    print("[EggDetector] === DUMP ===")
+    print("[EggDetector] === DUMP (" .. #self:getAll() .. " live eggs) ===")
     for i, rec in ipairs(self:getAll()) do
-        print(string.format("  [%d] %s | rarity=%s | dist=%.1f | %s",
-            i, rec.name, rec.rarity and rec.rarity.label or "?",
-            self:getDistance(rec), rec.instance:GetFullName()))
+        print(string.format("  [%d] %s | area=%s | rarity=%s | dist=%.1f",
+            i, rec.name, rec.area, rec.rarity and rec.rarity.label or "?",
+            self:getDistance(rec)))
     end
 end
 
