@@ -1,11 +1,11 @@
--- EggDetector.lua v4.2 — tries game's own egg database first
+-- EggDetector.lua v4.3 — numbered eggs + game DB
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local EggDetector = {}
 EggDetector.__index = EggDetector
-EggDetector.VERSION = "4.2.0"
+EggDetector.VERSION = "4.3.0"
 EggDetector.DEBUG = false
 
 local RARITY_TABLE = {
@@ -43,94 +43,27 @@ local function extractArea(inst)
     return "Unknown"
 end
 
--- Try loading the game's own egg directory. Returns { meshIdKey -> name }
-local eggDirectoryCache = nil
-local function loadEggDirectory()
-    if eggDirectoryCache ~= nil then return eggDirectoryCache end
-    eggDirectoryCache = {}
+-- Load the game's own egg directory for reference
+local eggDatabase = nil
+local function loadEggDatabase()
+    if eggDatabase then return eggDatabase end
+    eggDatabase = {}
 
-    -- Try the module path we saw in earlier game scripts
-    local paths = {
-        { ReplicatedStorage, "Data", "Assets" },
-        { ReplicatedStorage, "Shared", "Data", "Assets" },
-        { ReplicatedStorage, "Shared", "Util", "EggRecords" },
-        { ReplicatedStorage, "Data", "Eggs" },
-    }
-    for _, path in ipairs(paths) do
-        local ok, mod = pcall(function()
-            local obj = path[1]
-            for i = 2, #path do
-                obj = obj:FindFirstChild(path[i])
-                if not obj then return nil end
+    local ok, assets = pcall(function()
+        return require(ReplicatedStorage:WaitForChild("Data"):WaitForChild("Assets"))
+    end)
+    if ok and assets and assets.Directory then
+        for key, entry in pairs(assets.Directory) do
+            local name = (type(entry) == "table" and (entry.DisplayName or entry.Name)) or tostring(key)
+            local rarity = nil
+            if type(entry) == "table" and entry.Rarity then
+                rarity = entry.Rarity.DisplayName or tostring(entry.Rarity)
             end
-            return require(obj)
-        end)
-        if ok and mod then
-            print("[EggDetector] Loaded module:", table.concat(path, "."))
-            return eggDirectoryCache
+            table.insert(eggDatabase, { key = key, name = name, rarity = rarity })
         end
+        table.sort(eggDatabase, function(a, b) return a.name < b.name end)
     end
-    return eggDirectoryCache
-end
-
--- Extract best-guess name for a Model, walking many sources
-local function extractEggName(model, area)
-    -- 1) Attributes on model
-    for _, attr in ipairs({ "Name", "EggName", "DisplayName", "Title", "EggType", "Rarity", "Egg" }) do
-        local v = model:GetAttribute(attr)
-        if type(v) == "string" and v ~= "" then return v, "attr:"..attr end
-    end
-    -- 2) Attributes on nest (parent)
-    if model.Parent then
-        for _, attr in ipairs({ "Name", "EggName", "DisplayName", "Rarity", "EggType" }) do
-            local v = model.Parent:GetAttribute(attr)
-            if type(v) == "string" and v ~= "" then return v, "nestAttr:"..attr end
-        end
-    end
-    -- 3) StringValue descendants
-    for _, d in ipairs(model:GetDescendants()) do
-        if d:IsA("StringValue") and d.Value and d.Value ~= "" then
-            return d.Value, "stringValue:"..d.Name
-        end
-    end
-    -- 4) TextLabels
-    for _, d in ipairs(model:GetDescendants()) do
-        if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text and d.Text ~= "" then
-            -- skip common UI words
-            local t = d.Text
-            if #t > 2 and not t:match("^%s*$") then
-                return t, "textLabel"
-            end
-        end
-    end
-
-    -- 5) Look for the game's own egg-name mapping from mesh ID
-    local ids = {}
-    for _, d in ipairs(model:GetDescendants()) do
-        if d:IsA("MeshPart") and d.MeshId and d.MeshId ~= "" then
-            local n = string.match(d.MeshId, "%d+")
-            if n then table.insert(ids, n) end
-        elseif d:IsA("SpecialMesh") and d.MeshId and d.MeshId ~= "" then
-            local n = string.match(d.MeshId, "%d+")
-            if n then table.insert(ids, n) end
-        end
-    end
-    if #ids > 0 then
-        table.sort(ids)
-        -- Look up in the loaded directory
-        local dir = loadEggDirectory()
-        if dir then
-            for _, id in ipairs(ids) do
-                if dir[id] then return dir[id], "directory" end
-            end
-        end
-        -- Otherwise use a readable 4-digit signature
-        local sig = ids[1]:sub(-4)
-        return string.format("%s Egg (%s)", area or "Unknown", sig), "meshId"
-    end
-
-    -- 6) Fallback
-    return "Unidentified " .. area .. " Egg", "fallback"
+    return eggDatabase
 end
 
 function EggDetector.new()
@@ -175,10 +108,12 @@ function EggDetector:_scan()
     for _, area in ipairs(root:GetChildren()) do
         local nests = area:FindFirstChild("Nests")
         if nests then
+            local idx = 0
             for _, nest in ipairs(nests:GetChildren()) do
                 local eggModel = nest:FindFirstChild("Model")
                 if eggModel and eggModel:IsA("Model") then
-                    out[eggModel] = true
+                    idx = idx + 1
+                    out[eggModel] = { index = idx, area = area.Name }
                 end
             end
         end
@@ -192,33 +127,33 @@ function EggDetector:_getPosition(inst)
     return pp and pp.Position or nil
 end
 
-function EggDetector:_buildRecord(inst)
+function EggDetector:_buildRecord(inst, meta)
     local pos = self:_getPosition(inst)
-    local area = extractArea(inst)
-    local name, source = extractEggName(inst, area)
-    local rarity = classifyRarity(name)
-    if not rarity then rarity = classifyRarity(inst:GetFullName()) end
-
     return {
         instance = inst,
         target   = inst:FindFirstChildWhichIsA("BasePart", true),
-        name     = name,
-        nameSource = source,
-        area     = area,
-        rarity   = rarity,
+        name     = string.format("%s Egg #%d", meta.area or "Unknown", meta.index or 0),
+        area     = meta.area or "Unknown",
+        index    = meta.index or 0,
+        rarity   = nil,  -- unknown per-egg
         position = pos,
     }
 end
 
 function EggDetector:_refresh()
     local current = self:_scan()
-    for inst in pairs(current) do
+    for inst, meta in pairs(current) do
         if not self.eggs[inst] then
-            local rec = self:_buildRecord(inst)
+            local rec = self:_buildRecord(inst, meta)
             if rec.position then
                 self.eggs[inst] = rec
                 self:_emit("added", rec)
             end
+        else
+            -- refresh index/area
+            self.eggs[inst].index = meta.index
+            self.eggs[inst].area = meta.area
+            self.eggs[inst].name = string.format("%s Egg #%d", meta.area or "Unknown", meta.index or 0)
         end
     end
     for inst in pairs(self.eggs) do
@@ -260,22 +195,13 @@ function EggDetector:getAll()
     local list = {}
     for _, rec in pairs(self.eggs) do table.insert(list, rec) end
     local function dist(rec) return self:getDistance(rec) end
-    table.sort(list, function(a, b)
-        local ra = a.rarity and a.rarity.rank or 0
-        local rb = b.rarity and b.rarity.rank or 0
-        if ra ~= rb then return ra > rb end
-        return dist(a) < dist(b)
-    end)
+    table.sort(list, function(a, b) return dist(a) < dist(b) end)
     return list
 end
 
 function EggDetector:getMatching(rarityFilter, areaFilter)
     local out = {}
     for _, rec in ipairs(self:getAll()) do
-        local rarityOK = true
-        if rarityFilter and rarityFilter ~= "All" then
-            rarityOK = rec.rarity and rec.rarity.label == rarityFilter
-        end
         local areaOK = true
         if areaFilter and areaFilter ~= "All" then
             areaOK = string.lower(rec.area or "") == string.lower(areaFilter)
@@ -284,7 +210,7 @@ function EggDetector:getMatching(rarityFilter, areaFilter)
         if self.maxDistance and self.maxDistance < math.huge then
             distOK = self:getDistance(rec) <= self.maxDistance
         end
-        if rarityOK and areaOK and distOK then table.insert(out, rec) end
+        if areaOK and distOK then table.insert(out, rec) end
     end
     return out
 end
@@ -304,13 +230,15 @@ function EggDetector:getAreas()
     return list
 end
 
+function EggDetector:getEggDatabase()
+    return loadEggDatabase()
+end
+
 function EggDetector:dump()
     print("[EggDetector] === DUMP (" .. #self:getAll() .. " live eggs) ===")
     for i, rec in ipairs(self:getAll()) do
-        print(string.format("  [%d] %s | area=%s | rarity=%s | dist=%.1f | src=%s",
-            i, rec.name, rec.area,
-            rec.rarity and rec.rarity.label or "?",
-            self:getDistance(rec), rec.nameSource or "?"))
+        print(string.format("  [%d] %s | area=%s | dist=%.1f",
+            i, rec.name, rec.area, self:getDistance(rec)))
     end
 end
 
