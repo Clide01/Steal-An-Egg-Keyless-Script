@@ -1,4 +1,4 @@
--- AutoSteal.lua v3.0 — WalkSpeed hook + MoveTo
+-- AutoSteal.lua v3.1 — Heartbeat WalkSpeed (no metatable hook)
 
 local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
@@ -6,66 +6,47 @@ local LocalPlayer = Players.LocalPlayer
 
 local AutoSteal = {}
 AutoSteal.__index = AutoSteal
-AutoSteal.VERSION = "3.0.0"
+AutoSteal.VERSION = "3.1.0"
 
 local PROMPT_PART  = "SmartPromptPart"
 local PROMPT_CHILD = "CarryAreaEgg"
+local FORCED_WS    = 400
 
 -- =========================================================
--- WalkSpeed hook: force every set to at least FORCED_WS
+-- Heartbeat WalkSpeed — safe, doesn't touch metatables
 -- =========================================================
-local FORCED_WS = 500
-local hookActive = false
-local originalWalkSpeed = nil
+local wsConn = nil
+local wsEnabled = false
 
-local function installWalkSpeedHook()
-    if hookActive then return end
-    if type(getrawmetatable) ~= "function" then
-        warn("[AutoSteal] getrawmetatable not available — can't hook WalkSpeed")
-        return
-    end
-
-    local mt = getrawmetatable(game)
-    local oldNewIndex = mt.__newindex
-    if not oldNewIndex then return end
-
-    pcall(function() setreadonly(mt, false) end)
-    mt.__newindex = newcclosure(function(t, k, v)
-        if k == "WalkSpeed" and typeof(t) == "Instance" and t:IsA("Humanoid") then
-            if typeof(v) == "number" and v < FORCED_WS then
-                v = FORCED_WS
-            end
+local function startWalkSpeedLoop()
+    if wsConn then return end
+    wsEnabled = true
+    wsConn = RunService.Heartbeat:Connect(function()
+        if not wsEnabled then return end
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.WalkSpeed < FORCED_WS then
+            pcall(function() hum.WalkSpeed = FORCED_WS end)
         end
-        return oldNewIndex(t, k, v)
     end)
-    pcall(function() setreadonly(mt, true) end)
-
-    hookActive = true
-    print("[AutoSteal] WalkSpeed hook installed (min forced:", FORCED_WS .. ")")
+    print("[AutoSteal] WalkSpeed loop started (target " .. FORCED_WS .. ")")
 end
 
-local function uninstallWalkSpeedHook()
-    if not hookActive then return end
-    if type(getrawmetatable) ~= "function" then return end
-    local mt = getrawmetatable(game)
-    pcall(function() setreadonly(mt, false) end)
-    mt.__newindex = originalWalkSpeed
-    pcall(function() setreadonly(mt, true) end)
-    hookActive = false
-    print("[AutoSteal] WalkSpeed hook removed")
+local function stopWalkSpeedLoop()
+    wsEnabled = false
+    if wsConn then wsConn:Disconnect(); wsConn = nil end
+    print("[AutoSteal] WalkSpeed loop stopped")
 end
 
--- =========================================================
--- Constructor
--- =========================================================
 function AutoSteal.new(detector, opts)
     local self = setmetatable({}, AutoSteal)
     self.detector   = detector
     self.opts       = opts or {}
 
-    self.walkSpeed     = self.opts.WalkSpeed or FORCED_WS
-    self.moveTimeout   = self.opts.MoveTimeout or 8
-    self.arriveDist    = self.opts.ArriveDistance or 4
+    self.walkSpeed      = self.opts.WalkSpeed or FORCED_WS
+    self.moveTimeout    = self.opts.MoveTimeout or 10
+    self.arriveDist     = self.opts.ArriveDistance or 4
+    self.stallTolerance = self.opts.StallTolerance or 60   -- frames before giving up
 
     self.cooldown       = self.opts.Cooldown or 1.5
     self.globalCooldown = self.opts.GlobalCooldown or 0.3
@@ -79,6 +60,7 @@ function AutoSteal.new(detector, opts)
     self.lastAttempt  = {}
     self.stats        = { attempts = 0, successes = 0, failures = 0, lastStatus = "idle" }
     self._loopRunning = false
+    self._busy        = false     -- prevents overlapping moves
     self.log = function(...) print("[AutoSteal]", ...) end
     return self
 end
@@ -101,22 +83,10 @@ local function getPrompt()
     return part, prompt
 end
 
-local function resetCharacter()
-    local hrp = getHRP()
-    local hum = getHum()
-    if hrp then
-        pcall(function() hrp.Anchored = false end)
-        pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-        pcall(function() hrp.AssemblyAngularVelocity = Vector3.zero end)
-    end
-    if hum then hum.PlatformStand = false end
-end
-
 function AutoSteal:setEnabled(v)
     self.enabled = v and true or false
     if self.enabled then
-        installWalkSpeedHook()
-        resetCharacter()
+        startWalkSpeedLoop()
         if not self.safePosition then
             local hrp = getHRP()
             if hrp then
@@ -125,7 +95,7 @@ function AutoSteal:setEnabled(v)
             end
         end
     else
-        uninstallWalkSpeedHook()
+        stopWalkSpeedLoop()
     end
     self.stats.lastStatus = self.enabled and "running" or "idle"
 end
@@ -160,20 +130,16 @@ function AutoSteal:_targetIsValid()
 end
 
 -- =========================================================
--- MoveTo-based movement (works with the WalkSpeed hook)
+-- MoveTo — repeats until arrived or hard timeout
 -- =========================================================
 function AutoSteal:_moveTo(targetPos)
     local hrp = getHRP()
     local hum = getHum()
     if not hrp or not hum then return false end
 
-    resetCharacter()
-
-    -- Ensure the hook is active
-    if not hookActive then installWalkSpeedHook() end
-
-    -- Set WalkSpeed (hook forces min, this is just for us)
-    pcall(function() hum.WalkSpeed = self.walkSpeed end)
+    -- Make sure humanoid isn't stuck in a weird state
+    pcall(function() hum.PlatformStand = false end)
+    pcall(function() hum.WalkSpeed = FORCED_WS end)
 
     local deadline = tick() + self.moveTimeout
     local startPos = hrp.Position
@@ -181,6 +147,7 @@ function AutoSteal:_moveTo(targetPos)
     local arrived = false
     local lastDist = math.huge
     local stallCount = 0
+    local bestDist = math.huge
 
     while tick() < deadline do
         local current = hrp.Position
@@ -192,25 +159,29 @@ function AutoSteal:_moveTo(targetPos)
             break
         end
 
-        -- Stall detection
-        if math.abs(dist - lastDist) < 0.3 then
+        -- Track best progress; bail only if we're truly stuck for a long time
+        if dist < bestDist - 0.5 then
+            bestDist = dist
+            stallCount = 0
+        else
             stallCount = stallCount + 1
-            if stallCount > 30 then
-                self.log(string.format("Move stalled at dist=%.1f", dist))
+            if stallCount > self.stallTolerance then
+                self.log(string.format("Move stalled at %.1f studs (from %.1f)",
+                    dist, lastDist))
                 break
             end
-        else
-            stallCount = 0
         end
         lastDist = dist
 
-        -- Reissue MoveTo periodically
+        -- Re-set WalkSpeed (in case something reset it)
+        pcall(function() hum.WalkSpeed = FORCED_WS end)
+        -- Re-issue MoveTo
         pcall(function() hum:MoveTo(targetPos) end)
 
-        task.wait(0.05)
+        task.wait(0.1)
     end
 
-    -- Stop
+    -- Stop movement
     pcall(function() hum:MoveTo(hrp.Position) end)
 
     local traveled = (hrp.Position - startPos).Magnitude
@@ -250,31 +221,41 @@ function AutoSteal:_firePromptOnPart(part, prompt)
 end
 
 function AutoSteal:_stealOne(rec)
+    if self._busy then return false, "busy" end
+
     local now = tick()
     if now - self._lastGlobal < self.globalCooldown then return false, "global cooldown" end
     if now - (self.lastAttempt[rec.instance] or 0) < self.cooldown then return false, "cooldown" end
 
     self.lastAttempt[rec.instance] = now
     self._lastGlobal = now
-
-    resetCharacter()
+    self._busy = true
 
     local hrp = getHRP()
-    if not hrp then return false, "no HRP" end
+    if not hrp then
+        self._busy = false
+        return false, "no HRP"
+    end
 
     local part, prompt = getPrompt()
-    if not part or not prompt then return false, "prompt not found" end
+    if not part or not prompt then
+        self._busy = false
+        return false, "prompt not found"
+    end
 
     if not self.safePosition then self.safePosition = hrp.CFrame end
 
     local targetPos = part.Position + Vector3.new(0, 0.5, 0)
 
     local moved = self:_moveTo(targetPos)
+
     if not moved then
+        self.log("Could not reach egg")
         if self.safePosition then
             self:_moveTo(self.safePosition.Position)
         end
-        return false, "move failed"
+        self._busy = false
+        return false, "unreachable"
     end
 
     task.wait(0.1)
@@ -297,6 +278,7 @@ function AutoSteal:_stealOne(rec)
         self:_moveTo(self.safePosition.Position)
     end
 
+    self._busy = false
     return ok, fireErr
 end
 
@@ -306,7 +288,7 @@ function AutoSteal:startLoop(filters)
 
     task.spawn(function()
         while self._loopRunning do
-            if self.enabled then
+            if self.enabled and not self._busy then
                 local chosen = nil
                 if self:_targetIsValid() then
                     chosen = self.target
@@ -331,21 +313,18 @@ function AutoSteal:startLoop(filters)
                     end
                 end
                 if chosen then
-                    local ok, err = self:_stealOne(chosen)
-                    if not ok and err ~= "cooldown" and err ~= "global cooldown" then
-                        self.log("Failed:", chosen.name, "—", err)
-                    end
+                    self:_stealOne(chosen)
                 end
             end
-            task.wait(0.2)
+            task.wait(0.5)
         end
     end)
 end
 
 function AutoSteal:stopLoop()
     self._loopRunning = false
-    resetCharacter()
-    uninstallWalkSpeedHook()
+    self._busy = false
+    stopWalkSpeedLoop()
 end
 
 function AutoSteal:testFire(rec)
@@ -354,11 +333,8 @@ function AutoSteal:testFire(rec)
     if not rec then rec = { instance = prompt, name = "(manual test)" } end
     self.lastAttempt[rec.instance] = 0
     self._lastGlobal = 0
+    self._busy = false
     return self:_stealOne(rec)
 end
-
--- Expose for external use
-AutoSteal.installWalkSpeedHook = installWalkSpeedHook
-AutoSteal.uninstallWalkSpeedHook = uninstallWalkSpeedHook
 
 return AutoSteal
