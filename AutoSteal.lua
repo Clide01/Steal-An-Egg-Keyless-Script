@@ -1,4 +1,4 @@
--- AutoSteal.lua v2.2 — PlatformStand flight (no rubber-band)
+-- AutoSteal.lua v2.3 — anchored flight (real speed, no rubber-band)
 
 local RunService  = game:GetService("RunService")
 local Players     = game:GetService("Players")
@@ -6,7 +6,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local AutoSteal = {}
 AutoSteal.__index = AutoSteal
-AutoSteal.VERSION = "2.2.0"
+AutoSteal.VERSION = "2.3.0"
 
 local PROMPT_PART  = "SmartPromptPart"
 local PROMPT_CHILD = "CarryAreaEgg"
@@ -16,14 +16,14 @@ function AutoSteal.new(detector, opts)
     self.detector   = detector
     self.opts       = opts or {}
 
-    self.flySpeed       = self.opts.FlySpeed or 80
-    self.returnSpeed    = self.opts.ReturnSpeed or 120
-    self.stepMax        = self.opts.StepMax or 12      -- studs per heartbeat
+    self.flySpeed       = self.opts.FlySpeed or 600         -- studs/sec
+    self.returnSpeed    = self.opts.ReturnSpeed or 900      -- studs/sec
+    self.stepMax        = self.opts.StepMax or 40           -- hard cap: studs/frame
     self.flyTimeout     = self.opts.FlyTimeout or 8
     self.arriveDist     = self.opts.ArriveDistance or 4
 
-    self.cooldown       = self.opts.Cooldown or 2
-    self.globalCooldown = self.opts.GlobalCooldown or 0.5
+    self.cooldown       = self.opts.Cooldown or 1.5
+    self.globalCooldown = self.opts.GlobalCooldown or 0.3
     self._lastGlobal    = 0
 
     self.returnToOrigin = self.opts.ReturnToOrigin ~= false
@@ -83,14 +83,13 @@ end
 function AutoSteal:setTarget(rec)
     if not rec then return self:clearTarget() end
     self.target = rec
-    self.log("Target set:", rec.name, "|", rec.instance:GetFullName())
+    self.log("Target set:", rec.name)
 end
 function AutoSteal:clearTarget()
     self.target = nil
     self.log("Target cleared")
 end
 function AutoSteal:getTarget() return self.target end
-
 function AutoSteal:_targetIsValid()
     if not self.target then return false end
     if not self.target.instance or not self.target.instance.Parent then return false end
@@ -98,9 +97,8 @@ function AutoSteal:_targetIsValid()
 end
 
 -- =========================================================
--- Flight: PlatformStand + small CFrame steps
--- This is the same technique the game's own "safe" cutscenes use,
--- so the server accepts it without rubber-banding.
+-- Anchored flight — the humanoid can't fight an anchored part,
+-- so CFrame moves land exactly. No rubber-band possible.
 -- =========================================================
 function AutoSteal:_flyTo(targetPos, speedOverride)
     local hrp = getHRP()
@@ -109,8 +107,12 @@ function AutoSteal:_flyTo(targetPos, speedOverride)
 
     local speed = speedOverride or self.flySpeed
     local deadline = tick() + self.flyTimeout
+    local frames = 0
+    local startTime = tick()
+    local startPos = hrp.Position
 
-    -- Freeze the humanoid so nothing fights our CFrame updates
+    -- Save & freeze humanoid
+    local oldAnchored = hrp.Anchored
     local oldWS, oldJP, oldPS
     if hum then
         oldWS = hum.WalkSpeed
@@ -121,7 +123,10 @@ function AutoSteal:_flyTo(targetPos, speedOverride)
         hum.PlatformStand = true
     end
 
-    -- Zero out velocity to prevent drift
+    -- Anchor the HRP — this is what makes CFrame movement stick
+    hrp.Anchored = true
+
+    -- Zero velocities
     pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
     pcall(function() hrp.AssemblyAngularVelocity = Vector3.zero end)
 
@@ -139,10 +144,10 @@ function AutoSteal:_flyTo(targetPos, speedOverride)
             break
         end
 
-        -- Stall detection: if we're not getting closer for 12 frames, bail
-        if math.abs(dist - lastDist) < 0.5 then
+        -- Stall detection (only triggers if truly stuck)
+        if math.abs(dist - lastDist) < 0.1 then
             stalledFrames = stalledFrames + 1
-            if stalledFrames > 12 then
+            if stalledFrames > 30 then
                 self.log("Flight stalled — bailing")
                 break
             end
@@ -151,21 +156,30 @@ function AutoSteal:_flyTo(targetPos, speedOverride)
         end
         lastDist = dist
 
-        -- Step forward in small chunks so the server doesn't reject the CFrame
+        -- Speed is in studs/sec; assume ~60fps for the per-frame step
         local stepDist = math.min(speed / 60, self.stepMax, dist)
         local newPos = current + delta.Unit * stepDist
-        hrp.CFrame = CFrame.new(newPos, newPos + (targetPos - newPos).Unit)
-        hrp.AssemblyLinearVelocity = Vector3.zero
 
+        -- Face the direction of travel
+        local lookTarget = newPos + (targetPos - newPos).Unit
+        hrp.CFrame = CFrame.lookAt(newPos, lookTarget)
+
+        frames = frames + 1
         RunService.Heartbeat:Wait()
     end
 
-    -- Restore humanoid
+    -- Restore
+    hrp.Anchored = oldAnchored
     if hum then
         hum.PlatformStand = oldPS or false
         hum.WalkSpeed = oldWS or 16
         hum.JumpPower = oldJP or 50
     end
+
+    local elapsed = tick() - startTime
+    local traveled = (hrp.Position - startPos).Magnitude
+    self.log(string.format("Flight: %.1f studs in %.2fs (%.0f studs/s, %d frames)",
+        traveled, elapsed, traveled / math.max(elapsed, 0.001), frames))
 
     return arrived
 end
@@ -214,15 +228,19 @@ function AutoSteal:_stealOne(rec)
         self.safePosition = hrp.CFrame
     end
 
+    -- Aim at the prompt (which hovers over the target egg)
     local targetPos = part.Position + Vector3.new(0, 3, 0)
 
-    local moved, err = self:_flyTo(targetPos)
+    local moved = self:_flyTo(targetPos, self.flySpeed)
     if not moved then
-        self.log("Move failed:", err)
+        self.log("Move failed — returning to safe")
+        if self.safePosition then
+            self:_flyTo(self.safePosition.Position, self.returnSpeed)
+        end
         return false, "move failed"
     end
 
-    task.wait(0.15)
+    task.wait(0.12)
 
     self.stats.attempts = self.stats.attempts + 1
     local ok, fireErr = self:_firePromptOnPart(part, prompt)
@@ -238,7 +256,7 @@ function AutoSteal:_stealOne(rec)
     end
 
     if self.returnToOrigin and self.safePosition then
-        task.wait(0.2)
+        task.wait(0.15)
         self:_flyTo(self.safePosition.Position, self.returnSpeed)
     end
 
@@ -282,7 +300,7 @@ function AutoSteal:startLoop(filters)
                     end
                 end
             end
-            task.wait(0.3)
+            task.wait(0.2)
         end
     end)
 end
